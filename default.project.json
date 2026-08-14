@@ -1,0 +1,63 @@
+{
+  "name": "Game",
+  "tree": {
+    "$className": "DataModel",
+
+    "ReplicatedStorage": {
+      "$className": "ReplicatedStorage",
+      "$ignoreUnknownInstances": true,
+      "Core": {
+        "$path": "src/ReplicatedStorage/Core",
+        "Packages": {
+          "$path": "Packages"
+        }
+      },
+      "ClientRuntime": {
+        "$path": "src/ReplicatedStorage/ClientRuntime"
+      },
+      "Audio": {
+        "$path": "src/ReplicatedStorage/Audio"
+      },
+      "UI": {
+        "$path": "src/ReplicatedStorage/UI"
+      }
+    },
+
+    "ServerScriptService": {
+      "$className": "ServerScriptService",
+      "$ignoreUnknownInstances": true,
+      "Server": {
+        "$path": "src/ServerScriptService/Server.server.luau"
+      }
+    },
+
+    "ServerStorage": {
+      "$className": "ServerStorage",
+      "$ignoreUnknownInstances": true,
+      "ServerRuntime": {
+        "$path": "src/ServerStorage/ServerRuntime",
+        "Packages": {
+          "$path": "ServerPackages"
+        }
+      }
+    },
+
+    "StarterPlayer": {
+      "$className": "StarterPlayer",
+      "$ignoreUnknownInstances": true,
+      "StarterPlayerScripts": {
+        "$className": "StarterPlayerScripts",
+        "$ignoreUnknownInstances": true,
+        "Client": {
+          "$path": "src/StarterPlayer/StarterPlayerScripts/Client.client.luau"
+        }
+      },
+      "StarterCharacterScripts": {
+        "$className": "StarterCharacterScripts",
+        "$ignoreUnknownInstances": true,
+        "$path": "src/StarterPlayer/StarterCharacterScripts"
+      }
+    }
+
+  }
+}

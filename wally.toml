@@ -1,0 +1,18 @@
+[package]
+name = "sawcy/framework-template"
+version = "0.1.0"
+registry = "https://github.com/UpliftGames/wally-index"
+realm = "shared"
+
+[dependencies]
+Promise = "evaera/promise@4.0.0"
+ProfileStore = "sekuriyo-lotus/profilestore@1.0.4"
+ReplicaController = "etheroit/replicacontroller@1.0.0"
+ReplicaService = "robloxiandemo/replicaservice-demo@0.1.4"
+BridgeNet2 = "ffrostflame/bridgenet2@1.0.0"
+Scythe = "synttx/scythe@1.1.2"
+
+
+
+[server-dependencies]
+ReplicasService = "etheroit/replicaservice@1.0.2"

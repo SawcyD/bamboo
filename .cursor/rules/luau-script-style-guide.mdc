@@ -1,0 +1,40 @@
+---
+description: Luau script style and structure conventions
+alwaysApply: true
+---
+
+# Script Style Guide (Luau)
+
+Follow these defaults in this repository unless a file already uses a different established pattern.
+
+- Keep code simple and readable; prefer short single-purpose functions.
+- Match project patterns over novel abstractions when uncertain.
+
+## Naming
+
+- Public/main functions: `PascalCase` (example: `ShowRevealVFX`)
+- Private/helper functions: `_camelCase` (example: `_refreshCounters`)
+- Local variables: `camelCase`
+- Module tables and types: `PascalCase`
+- Constants: `UPPER_SNAKE_CASE`
+
+## File Order
+
+Use this order in most Luau scripts:
+1) pragma (`--!strict`), 2) optional short purpose comment, 3) Services, 4) requires, 5) Constants, 6) Types, 7) private state, 8) private helpers, 9) public API, 10) `return ModuleTable`.
+
+## Function + Comment Style
+
+- Prefer action-oriented names (`Show...`, `Play...`, `Bind...`, `Refresh...`).
+- Prefer early returns over deep nesting.
+- Keep comments short and intent-focused; avoid obvious comments.
+- Use short `--[[ ... ]]` doc blocks for public functions or non-obvious helpers.
+- In doc blocks, describe params in gameplay/system terms, not just types.
+
+## Controller/UI/Data Practices
+
+- Keep controller update loops centralized when possible.
+- Use explicit `BindToRenderStep` names and explicit unbind/cleanup.
+- Validate payloads at boundaries; keep schema/runtime keys consistent.
+- Use explicit fallback values for missing/invalid data.
+- Return safely (with guarded fallbacks) for non-critical visual failures.

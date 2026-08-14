@@ -1,0 +1,25 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  lint:
+    name: Lint & Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rokit toolchain
+        uses: CompeyDev/setup-rokit@v0.1.2
+
+      - name: Lint (selene)
+        run: selene src
+
+      - name: Format check (StyLua)
+        run: stylua --check src
+
+      - name: Build place (rojo)
+        run: rojo build --output build-test.rbxl
