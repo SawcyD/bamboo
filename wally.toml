@@ -11,6 +11,8 @@ ReplicaController = "etheroit/replicacontroller@1.0.0"
 ReplicaService = "robloxiandemo/replicaservice-demo@0.1.4"
 BridgeNet2 = "ffrostflame/bridgenet2@1.0.0"
 Scythe = "synttx/scythe@1.1.2"
+Spring = "sleitnick/spring@1.0.0"
+Shake = "sleitnick/shake@1.1.0"
 
 
 

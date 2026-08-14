@@ -35,6 +35,17 @@ function Core:GetShared(name: string): any
 	return loaderFor("Shared"):Get(name)
 end
 
+--- Shared game domains (Core/Shared/Domains/<Name>), e.g. Core:GetDomain("Bamboo").
+function Core:GetDomain(name: string): any
+	local loader = _loaders.Domains
+	if not loader then
+		local domains = script:WaitForChild("Shared"):WaitForChild("Domains") :: Folder
+		loader = ModuleLoader.new(domains)
+		_loaders.Domains = loader
+	end
+	return loader:Get(name)
+end
+
 function Core:GetPackage(name: string): any
 	return loaderFor("Packages"):Get(name)
 end

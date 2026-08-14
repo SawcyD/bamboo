@@ -10,11 +10,14 @@ local UI = {}
 
 local _buttonsFolder = script:WaitForChild("Buttons") :: Folder
 local _framesFolder = script:WaitForChild("Frames") :: Folder
+local _modulesFolder = script:WaitForChild("Modules") :: Folder
 
 local _buttonModules: ModuleCache = {}
 local _frameModules: ModuleCache = {}
+local _sharedModules: ModuleCache = {}
 local _loadingButton: LoadGuard = {}
 local _loadingFrame: LoadGuard = {}
+local _loadingModule: LoadGuard = {}
 
 local _started = false
 
@@ -77,6 +80,11 @@ end
 
 function UI:GetFrame(name: string): any
 	return lazyRequire(_framesFolder, name, _frameModules, _loadingFrame)
+end
+
+--- Shared UI helpers from UI/Modules (Ripple, MessageToast...). Not auto-started.
+function UI:GetModule(name: string): any
+	return lazyRequire(_modulesFolder, name, _sharedModules, _loadingModule)
 end
 
 return UI

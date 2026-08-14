@@ -45,9 +45,24 @@ dependencies = []
 [[package]]
 name = "sawcy/framework-template"
 version = "0.1.0"
-dependencies = [["BridgeNet2", "ffrostflame/bridgenet2@1.0.0"], ["ProfileStore", "sekuriyo-lotus/profilestore@1.0.4"], ["Promise", "evaera/promise@4.0.0"], ["ReplicaController", "etheroit/replicacontroller@1.0.0"], ["ReplicaService", "robloxiandemo/replicaservice-demo@0.1.4"], ["ReplicasService", "etheroit/replicaservice@1.0.2"]]
+dependencies = [["BridgeNet2", "ffrostflame/bridgenet2@1.0.0"], ["ProfileStore", "sekuriyo-lotus/profilestore@1.0.4"], ["Promise", "evaera/promise@4.0.0"], ["ReplicaController", "etheroit/replicacontroller@1.0.0"], ["ReplicaService", "robloxiandemo/replicaservice-demo@0.1.4"], ["Scythe", "synttx/scythe@1.2.1"], ["Shake", "sleitnick/shake@1.1.0"], ["Spring", "sleitnick/spring@1.0.0"], ["ReplicasService", "etheroit/replicaservice@1.0.2"]]
 
 [[package]]
 name = "sekuriyo-lotus/profilestore"
 version = "1.0.4"
+dependencies = []
+
+[[package]]
+name = "sleitnick/shake"
+version = "1.1.0"
+dependencies = []
+
+[[package]]
+name = "sleitnick/spring"
+version = "1.0.0"
+dependencies = []
+
+[[package]]
+name = "synttx/scythe"
+version = "1.2.1"
 dependencies = []
