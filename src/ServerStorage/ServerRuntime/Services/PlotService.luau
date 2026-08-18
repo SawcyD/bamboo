@@ -98,6 +98,7 @@ local function _buildPlotModel(index: number): Plot
 	local model = Instance.new("Model")
 	model.Name = plotId
 	model:SetAttribute("PlotId", plotId)
+	model:SetAttribute("PlotIndex", index)
 
 	local ground = _newPart(
 		"Ground",

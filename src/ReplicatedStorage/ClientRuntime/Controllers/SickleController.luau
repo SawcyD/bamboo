@@ -25,6 +25,7 @@ local Relay = Core:GetShared("Network")
 local Replica = Core:Get("Replica")
 
 local SickleController = {}
+local Framework: any
 
 local LOCAL_PLAYER = Players.LocalPlayer
 local SWING_BIND = "BambooSickleSwing"
@@ -60,6 +61,9 @@ local _breakEnergy = 0
 -- Which definition the visuals are currently built for, so the blade is only
 -- rebuilt when the player actually swaps sickles.
 local _visualSickleId: string? = nil
+local _targetScanAt = -math.huge
+local _targetInReach = false
+local TARGET_SCAN_SECONDS = 0.12
 
 -- ── tool construction ────────────────────────────────────────────────────────
 
@@ -227,9 +231,24 @@ end
 
 -- True when a mature stalk is inside the rotor's reach, in any direction.
 local function _hasTargetInReach(root: BasePart): boolean
+	local now = os.clock()
+	if now - _targetScanAt < TARGET_SCAN_SECONDS then
+		return _targetInReach
+	end
+	_targetScanAt = now
+
+	if Framework then
+		local growth = Framework:GetController("BambooGrowthController")
+		if growth and type(growth.HasMatureInRange) == "function" then
+			_targetInReach = growth:HasMatureInRange(root.Position, _equipped().range)
+			return _targetInReach
+		end
+	end
+
 	local folder = _ownedBambooFolder()
 	if not folder then
-		return false
+		_targetInReach = false
+		return _targetInReach
 	end
 
 	local origin = root.Position
@@ -245,11 +264,13 @@ local function _hasTargetInReach(root: BasePart): boolean
 		end
 		local flat = primary.Position - origin
 		if flat.X * flat.X + flat.Z * flat.Z <= rangeSq then
-			return true
+			_targetInReach = true
+			return _targetInReach
 		end
 	end
 
-	return false
+	_targetInReach = false
+	return _targetInReach
 end
 
 -- ── frame ────────────────────────────────────────────────────────────────────
@@ -315,7 +336,8 @@ local function _onCharacter(character: Model)
 	_visualSickleId = nil
 end
 
-function SickleController:Start(_fw: any)
+function SickleController:Start(fw: any)
+	Framework = fw
 	if LOCAL_PLAYER.Character then
 		task.spawn(_onCharacter, LOCAL_PLAYER.Character)
 	end

@@ -7,6 +7,7 @@
 
 local Economy = require(script.Parent:WaitForChild("Economy"))
 local Field = require(script.Parent:WaitForChild("Field"))
+local Mutations = require(script.Parent:WaitForChild("Mutations"))
 local Rarity = require(script.Parent:WaitForChild("Rarity"))
 local Tool = require(script.Parent:WaitForChild("Tool"))
 local Upgrades = require(script.Parent:WaitForChild("Upgrades"))
@@ -42,12 +43,19 @@ end
 
 --[[
 	Bamboo a single stalk actually gives when it breaks.
-	@param rarityId string Rarity of the stalk that broke.
+
+	Type and mutation are separate layers and both apply, which is what makes a
+	Golden Thick worth chasing. This is the only place the two are combined —
+	no service multiplies them again.
+
+	@param rarityId string Type of the stalk that broke (Normal/Tall/Thick).
 	@param yieldLevel number The player's Yield level.
-	@return number Bamboo to add to the bag.
+	@param mutationId string? Mutation on the stalk; nil or "None" for plain.
+	@return number Bamboo to add to the bag, rounded down to whole units.
 ]]
-function Value.StalkReward(rarityId: string, yieldLevel: number): number
-	return Value.YieldPerStalk(yieldLevel) * Rarity.Get(rarityId).rewardMultiplier
+function Value.StalkReward(rarityId: string, yieldLevel: number, mutationId: string?): number
+	local base = Value.YieldPerStalk(yieldLevel) * Rarity.Get(rarityId).rewardMultiplier
+	return math.floor(base * Mutations.Get(mutationId).valueMultiplier)
 end
 
 --[[
@@ -94,12 +102,28 @@ function Value.StageAt(secondsSinceCut: number, level: number): number
 end
 
 --[[
+	Continuous visual scale for a regrowing stalk, from a sprout up to full
+	height. Smoothstepped so it reads as a plant reaching rather than a number
+	counting up: slow at first, quickest mid-growth, settling into full size.
+	@param secondsSinceCut number Seconds elapsed since the stalk was cut.
+	@param level number The player's Growth Speed level.
+	@return number Scale from StageScale[Shoot] up to 1.
+]]
+function Value.GrowthScale(secondsSinceCut: number, level: number): number
+	local t = math.clamp(secondsSinceCut / Value.RegrowSeconds(level), 0, 1)
+	-- smoothstep: t^2 * (3 - 2t)
+	local eased = t * t * (3 - 2 * t)
+	local shoot = Field.StageScale[Field.Stage.Shoot]
+	return shoot + (1 - shoot) * eased
+end
+
+--[[
 	How many stalks the field holds.
 	@param level number The player's Density level.
 	@return number Stalk count.
 ]]
 function Value.MaxStalks(level: number): number
-	return Field.MaxStalks + level * 3
+	return Field.MaxStalks + level * 8
 end
 
 --[[

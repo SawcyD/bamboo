@@ -15,6 +15,7 @@ return {
 	Types = require(script:WaitForChild("Types")),
 	Field = require(script:WaitForChild("Field")),
 	Rarity = require(script:WaitForChild("Rarity")),
+	Mutations = require(script:WaitForChild("Mutations")),
 	Drops = require(script:WaitForChild("Drops")),
 	Tool = require(script:WaitForChild("Tool")),
 	Upgrades = require(script:WaitForChild("Upgrades")),

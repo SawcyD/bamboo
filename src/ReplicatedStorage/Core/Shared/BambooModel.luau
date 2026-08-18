@@ -17,6 +17,9 @@ local BASE_HEIGHT = 9 -- studs, a Normal mature stalk at variation 1.0
 local BASE_DIAMETER = 0.65
 local NODE_COLOR_DARKEN = 0.22
 local LEAF_SIZE = Vector3.new(0.08, 1.5, 0.55)
+-- Mutations at or above this glow get a PointLight, so only the genuinely rare
+-- ones cost a light.
+local AURA_GLOW_THRESHOLD = 0.5
 
 export type StalkVisual = BambooTypes.StalkVisual
 
@@ -55,13 +58,40 @@ local function _newLeaf(color: Color3): Part
 	return leaf
 end
 
+-- Mutations restyle the stalk rather than adding decoration on top: a mutated
+-- stalk changes colour, node colour, leaf colour, and material together, so it
+-- is recognisable at a glance on a phone rather than only up close.
+local function _mutationStyle(visual: StalkVisual)
+	local mutation = Bamboo.Mutations.Get(visual.mutation)
+	if mutation.id == "None" then
+		return {
+			color = visual.color,
+			nodeColor = _darken(visual.color, NODE_COLOR_DARKEN),
+			leafColor = visual.color,
+			material = Enum.Material.Grass,
+			glow = 0,
+		}
+	end
+
+	return {
+		-- Keep a little of the stalk's own colour jitter so mutated bamboo still
+		-- varies between stalks instead of looking stamped.
+		color = mutation.color:Lerp(visual.color, 0.12),
+		nodeColor = mutation.nodeColor,
+		leafColor = mutation.leafColor,
+		material = mutation.material,
+		glow = mutation.glow,
+	}
+end
+
 -- Builds the segments + leaves of one stalk, parented to `model`, standing on
 -- `baseCFrame` (which sits on the ground with +Y up).
 local function _buildStalkParts(model: Model, baseCFrame: CFrame, visual: StalkVisual, rng: Random)
 	local height = BASE_HEIGHT * visual.heightScale
 	local diameter = BASE_DIAMETER * visual.thicknessScale
 	local segmentHeight = height / SEGMENT_COUNT
-	local nodeColor = _darken(visual.color, NODE_COLOR_DARKEN)
+	local style = _mutationStyle(visual)
+	local nodeColor = style.nodeColor
 
 	-- Tilt the whole stalk slightly so a field never reads as a grid.
 	local tilt = CFrame.fromAxisAngle(
@@ -75,7 +105,8 @@ local function _buildStalkParts(model: Model, baseCFrame: CFrame, visual: StalkV
 	for i = 1, SEGMENT_COUNT do
 		local centreY = (i - 0.5) * segmentHeight
 		-- Cylinders extend along X, so rotate 90° to stand them up.
-		local segment = _newSegment("Segment" .. i, Vector3.new(segmentHeight * 0.94, diameter, diameter), visual.color)
+		local segment = _newSegment("Segment" .. i, Vector3.new(segmentHeight * 0.94, diameter, diameter), style.color)
+		segment.Material = style.material
 		segment.CFrame = stalkCFrame * CFrame.new(0, centreY, 0) * CFrame.Angles(0, 0, math.rad(90))
 		segment.Parent = model
 		trunk = trunk or segment
@@ -90,7 +121,7 @@ local function _buildStalkParts(model: Model, baseCFrame: CFrame, visual: StalkV
 	end
 
 	for _ = 1, visual.leafCount do
-		local leaf = _newLeaf(visual.color)
+		local leaf = _newLeaf(style.leafColor)
 		local heightAlong = rng:NextNumber(height * 0.45, height * 0.98)
 		local yaw = rng:NextNumber(0, math.pi * 2)
 		leaf.CFrame = stalkCFrame
@@ -99,6 +130,18 @@ local function _buildStalkParts(model: Model, baseCFrame: CFrame, visual: StalkV
 			* CFrame.new(0, LEAF_SIZE.Y * 0.5, 0)
 		leaf.Size = LEAF_SIZE * Vector3.new(1, rng:NextNumber(0.75, 1.3), rng:NextNumber(0.8, 1.2))
 		leaf.Parent = model
+	end
+
+	-- Rare mutations get a light so they are visible before the stalk itself
+	-- resolves. One light per stalk, only on the mutations that earn it.
+	if style.glow >= AURA_GLOW_THRESHOLD and trunk then
+		local light = Instance.new("PointLight")
+		light.Name = "MutationAura"
+		light.Color = style.color
+		light.Brightness = 1.5 * style.glow
+		light.Range = 10 + 8 * style.glow
+		light.Shadows = false
+		light.Parent = trunk
 	end
 
 	-- Cache each part's untouched size/offset so ApplyStage can rescale from the
@@ -135,6 +178,7 @@ function BambooModel.Build(visual: StalkVisual, baseCFrame: CFrame, rng: Random)
 	model.Name = "Bamboo"
 	_buildStalkParts(model, baseCFrame, visual, rng)
 	model:SetAttribute("Rarity", visual.rarity)
+	model:SetAttribute("Mutation", visual.mutation)
 	return model
 end
 
@@ -147,6 +191,19 @@ end
 ]]
 function BambooModel.ApplyStage(model: Model, stage: number, baseCFrame: CFrame)
 	local scale = Bamboo.Field.StageScale[stage] or 1
+	BambooModel.ApplyScale(model, scale, baseCFrame)
+	model:SetAttribute("Stage", stage)
+end
+
+--[[
+	Scales a stalk in place to an arbitrary factor, for continuous growth. The
+	stage scales are just three points on this curve — the client walks between
+	them smoothly instead of snapping.
+	@param model Model Stalk previously returned by Build.
+	@param scale number Multiplier, e.g. 0.5 for half height.
+	@param baseCFrame CFrame The stalk's ground CFrame, used as the scale pivot.
+]]
+function BambooModel.ApplyScale(model: Model, scale: number, baseCFrame: CFrame)
 	local previous = model:GetAttribute("StageScale") or 1
 	if math.abs(previous - scale) < 1e-3 then
 		return
@@ -164,7 +221,6 @@ function BambooModel.ApplyStage(model: Model, stage: number, baseCFrame: CFrame)
 	end
 
 	model:SetAttribute("StageScale", scale)
-	model:SetAttribute("Stage", stage)
 end
 
 return BambooModel

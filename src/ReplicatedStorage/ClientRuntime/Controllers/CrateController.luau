@@ -32,6 +32,7 @@ local Replica = Core:Get("Replica")
 local UI = require(ReplicatedStorage:WaitForChild("UI"))
 local Ripple = UI:GetModule("Ripple")
 local ShadowText = UI:GetModule("ShadowText")
+local AntiCheat = require(script.Parent:WaitForChild("AntiCheatController"))
 
 local CrateController = {}
 
@@ -353,6 +354,8 @@ local function _ensureReelGui(): ScreenGui
 	gui.DisplayOrder = 20
 	gui.Enabled = false
 	gui.Parent = LOCAL_PLAYER:WaitForChild("PlayerGui")
+	-- Built at runtime, so the anti-cheat scanner has to be told it is ours.
+	AntiCheat.Approve(gui)
 
 	_reelGui = gui
 	return gui

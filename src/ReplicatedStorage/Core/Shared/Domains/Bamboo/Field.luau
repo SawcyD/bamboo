@@ -10,11 +10,11 @@ local Field = {}
 
 -- ── stock and regrowth ───────────────────────────────────────────────────────
 
--- Base field. Sized so a fresh player's rotor is almost always in range of
--- something; Density then makes it increasingly ridiculous rather than merely
--- playable.
-Field.MaxStalks = 34
-Field.StartingStalks = 34
+-- Base field. Sized so the plot reads as a bamboo forest from the first second
+-- — full coverage, thickets to sweep, lanes to run — rather than as scattered
+-- stalks. Density then thickens it further rather than making it playable.
+Field.MaxStalks = 180
+Field.StartingStalks = 180
 Field.RegrowSeconds = 40
 -- A cut stalk reseeds as a Shoot right away, becomes Young after ShootSeconds,
 -- and is only cuttable again once RegrowSeconds have passed.
@@ -22,31 +22,30 @@ Field.ShootSeconds = 14
 
 -- ── planting ─────────────────────────────────────────────────────────────────
 
--- Separation the planter aims for between neighbouring stalks. It is a target,
--- not a guarantee: inside a dense clump the sampler settles for the roomiest
--- spot it found rather than failing to plant, so real gaps bottom out around
--- three studs. Well under the sickle's 7-stud reach either way.
-Field.MinSeparationStuds = 4.2
+-- Bamboo fills the whole field rather than sitting in isolated patches: this is
+-- a forest, not a set of islands. Density varies organically across the plot so
+-- there are thickets and thinner lanes to walk, but there is bamboo everywhere.
 
--- Stalks per clump. Clumps are filled in order, so buying Density extends the
--- current clump and then starts new ones — the field gains fresh patches to run
--- between rather than one growing blob.
-Field.StalksPerClump = 7
--- How far a stalk may sit from its clump centre. Tuned against the sickle's
--- 7-stud reach: at this radius the average stalk has three neighbours in range,
--- which is exactly the starter sickle's multi-hit.
-Field.ClumpRadiusStuds = 6.5
--- Clump centres are kept at least this far apart, which is what carves the
--- walkable channels. A clump is ~13 studs across, so this leaves a short gap
--- the rotor barely notices crossing.
-Field.ClumpSeparationStuds = 18
--- Fraction of the field's half-width clump centres are allowed to reach, so
--- nothing plants right on the boundary.
-Field.UsableExtent = 0.86
+-- Hard floor on how close two stalks may sit, whatever the density. Below this
+-- they visually merge into one trunk.
+Field.MinSeparationStuds = 2.1
 
--- Rejection sampling gives up after this many tries and takes the best it
--- found, so a dense field can never hang the server.
-local PLACEMENT_ATTEMPTS = 24
+-- How far local density is allowed to swing from the average, 0-1. This is what
+-- makes thickets and lanes instead of an even scatter.
+Field.DensityVariation = 0.55
+-- Size of the density blobs, in studs. Roughly the width of one thicket.
+Field.DensityFeatureStuds = 100
+
+-- Fraction of the field's half-width stalks may reach, so nothing plants right
+-- on the boundary.
+Field.UsableExtent = 0.94
+
+-- Dart-throwing gives up on a point after this many misses. Higher fills more
+-- completely; this is enough to place a full field without a visible hole.
+local PLACEMENT_ATTEMPTS = 30
+-- Fraction of ideal packing random placement reliably reaches. Below the ~0.7
+-- theoretical ceiling so the last few stalks still find room.
+local PACKING_EFFICIENCY = 0.62
 
 -- ── growth stages ────────────────────────────────────────────────────────────
 
@@ -79,60 +78,124 @@ end
 
 -- ── planting ─────────────────────────────────────────────────────────────────
 
--- Squared distance to the nearest point in a list. Squared throughout so the
--- inner loop never takes a square root.
-local function _nearestDistSq(points: { Vector3 }, candidate: Vector3): number
-	local best = math.huge
-	for _, point in points do
-		local dx = point.X - candidate.X
-		local dz = point.Z - candidate.Z
-		local distSq = dx * dx + dz * dz
-		if distSq < best then
-			best = distSq
-		end
-	end
-	return best
+-- Local density multiplier at a point: >1 where the forest thickens, <1 in the
+-- lanes between. Smooth noise, so thickets are contiguous rather than speckled.
+local function _densityAt(x: number, z: number, seed: number): number
+	local scale = 1 / Field.DensityFeatureStuds
+	-- math.noise returns roughly -0.5..0.5.
+	local n = math.noise(x * scale, z * scale, seed)
+	return 1 + math.clamp(n * 2, -1, 1) * Field.DensityVariation
 end
 
--- Scatters clump centres across the field, keeping them apart by rejection
--- sampling. Falls back to the roomiest candidate found rather than failing, so
--- a very dense field still plants every clump.
-local function _placeClumpCentres(count: number, halfExtent: number, rng: Random): { Vector3 }
-	local centres: { Vector3 } = {}
-	local minSepSq = Field.ClumpSeparationStuds * Field.ClumpSeparationStuds
+-- Spatial hash so the separation check stays O(1) per candidate rather than
+-- scanning every placed stalk. A full field is a few hundred points.
+local function _newGrid(cell: number)
+	return { cell = cell, buckets = {} :: { [string]: { Vector3 } } }
+end
 
-	for _ = 1, count do
-		local best: Vector3? = nil
-		local bestDistSq = -1
+local function _bucketKey(grid, x: number, z: number): string
+	return string.format("%d:%d", math.floor(x / grid.cell), math.floor(z / grid.cell))
+end
 
-		for _ = 1, PLACEMENT_ATTEMPTS do
-			local candidate =
-				Vector3.new(rng:NextNumber(-halfExtent, halfExtent), 0, rng:NextNumber(-halfExtent, halfExtent))
-			local distSq = if #centres == 0 then math.huge else _nearestDistSq(centres, candidate)
+local function _insert(grid, point: Vector3)
+	local key = _bucketKey(grid, point.X, point.Z)
+	local bucket = grid.buckets[key]
+	if not bucket then
+		bucket = {}
+		grid.buckets[key] = bucket
+	end
+	table.insert(bucket, point)
+end
 
-			if distSq >= minSepSq then
-				best = candidate
-				break
+-- True when nothing already placed sits within `radius` of the candidate.
+local function _isClear(grid, candidate: Vector3, radius: number): boolean
+	local radiusSq = radius * radius
+	local cx = math.floor(candidate.X / grid.cell)
+	local cz = math.floor(candidate.Z / grid.cell)
+
+	for dx = -1, 1 do
+		for dz = -1, 1 do
+			local bucket = grid.buckets[string.format("%d:%d", cx + dx, cz + dz)]
+			if bucket then
+				for _, point in bucket do
+					local ox = point.X - candidate.X
+					local oz = point.Z - candidate.Z
+					if ox * ox + oz * oz < radiusSq then
+						return false
+					end
+				end
 			end
-			if distSq > bestDistSq then
-				bestDistSq = distSq
-				best = candidate
+		end
+	end
+	return true
+end
+
+-- Reorders points so that *any* prefix still covers the whole field.
+--
+-- This matters because plots pre-build slots for a fully upgraded forest and
+-- then plant only the first N. Without it, a low-Density player would get every
+-- stalk bunched wherever generation happened to start.
+local function _spreadOrder(points: { Vector3 }): { Vector3 }
+	local remaining = table.clone(points)
+	local ordered: { Vector3 } = {}
+	if #remaining == 0 then
+		return ordered
+	end
+
+	-- Start at the point closest to the middle, so a tiny field is centred.
+	local bestIndex, bestDistSq = 1, math.huge
+	for index, point in remaining do
+		local distSq = point.X * point.X + point.Z * point.Z
+		if distSq < bestDistSq then
+			bestDistSq, bestIndex = distSq, index
+		end
+	end
+	table.insert(ordered, table.remove(remaining, bestIndex) :: Vector3)
+
+	-- Then repeatedly take whichever remaining point is farthest from everything
+	-- already taken (farthest-point traversal).
+	local nearest: { number } = {}
+	for index, point in remaining do
+		local ox = point.X - ordered[1].X
+		local oz = point.Z - ordered[1].Z
+		nearest[index] = ox * ox + oz * oz
+	end
+
+	while #remaining > 0 do
+		local pickIndex, pickDistSq = 1, -1
+		for index = 1, #remaining do
+			if nearest[index] > pickDistSq then
+				pickDistSq, pickIndex = nearest[index], index
 			end
 		end
 
-		if best then
-			table.insert(centres, best)
+		local picked = remaining[pickIndex]
+		table.insert(ordered, picked)
+		table.remove(remaining, pickIndex)
+		table.remove(nearest, pickIndex)
+
+		for index = 1, #remaining do
+			local ox = remaining[index].X - picked.X
+			local oz = remaining[index].Z - picked.Z
+			local distSq = ox * ox + oz * oz
+			if distSq < nearest[index] then
+				nearest[index] = distSq
+			end
 		end
 	end
 
-	return centres
+	return ordered
 end
 
 --[[
-	Plants a field: clustered offsets in the plot's local space, one per stalk.
+	Plants a field: forest offsets in the plot's local space, one per stalk.
+
+	Stalks are spread across the entire field with organic thick and thin areas,
+	then ordered so any prefix still covers the whole plot — which is what lets
+	Density thicken the forest evenly instead of growing it out from one corner.
 
 	Fully deterministic for a given `rng`, so a plot seeded from its index lays
-	out the same way every server. Callers convert these to world CFrames.
+	out the same way on every server.
 
 	@param count number How many stalks to plant.
 	@param halfExtent number Half the field's width in studs; nothing plants beyond it.
@@ -140,61 +203,41 @@ end
 	@return { Vector3 } Local offsets, one per stalk, in planting order.
 ]]
 function Field.BuildSlots(count: number, halfExtent: number, rng: Random): { Vector3 }
-	local slots: { Vector3 } = {}
 	if count <= 0 then
-		return slots
+		return {}
 	end
 
 	local usable = halfExtent * Field.UsableExtent
-	local clumpCount = math.max(1, math.round(count / Field.StalksPerClump))
-	local centres = _placeClumpCentres(clumpCount, usable, rng)
-	if #centres == 0 then
-		centres = { Vector3.zero }
-	end
+	local area = (usable * 2) ^ 2
+	-- Separation that actually fits `count` stalks. Random dart-throwing tops out
+	-- near 70% of ideal packing, so the separation is derived from that limit
+	-- rather than from a perfect grid — with headroom, or the tail of the field
+	-- never places and the forest comes out thin.
+	local target = math.max(math.sqrt(PACKING_EFFICIENCY * area / count), Field.MinSeparationStuds)
 
-	local minSepSq = Field.MinSeparationStuds * Field.MinSeparationStuds
+	-- One noise seed per field, so two plots do not share a thicket pattern.
+	local noiseSeed = rng:NextNumber(0, 1000)
+	local grid = _newGrid(math.max(target, Field.MinSeparationStuds))
+	local points: { Vector3 } = {}
 
-	for index = 1, count do
-		-- Clumps are filled in order, not round-robin. Plots pre-build slots for a
-		-- fully upgraded field and then plant only a prefix of them, so any prefix
-		-- has to be a set of *complete* clumps — round-robin would spread a small
-		-- field thinly across every clump and undo the clustering entirely.
-		local clumpIndex = math.min(math.floor((index - 1) / Field.StalksPerClump) + 1, #centres)
-		local centre = centres[clumpIndex]
+	local attempts = 0
+	local maxAttempts = count * PLACEMENT_ATTEMPTS
+	while #points < count and attempts < maxAttempts do
+		attempts += 1
 
-		local best: Vector3? = nil
-		local bestDistSq = -1
+		local x = rng:NextNumber(-usable, usable)
+		local z = rng:NextNumber(-usable, usable)
+		-- Dense areas want a *smaller* separation, hence the divide.
+		local separation = math.max(target / _densityAt(x, z, noiseSeed), Field.MinSeparationStuds)
 
-		for _ = 1, PLACEMENT_ATTEMPTS do
-			-- sqrt on the radius spreads stalks evenly over the disc instead of
-			-- bunching them all at the centre.
-			local radius = Field.ClumpRadiusStuds * math.sqrt(rng:NextNumber())
-			local angle = rng:NextNumber(0, math.pi * 2)
-			local candidate = centre + Vector3.new(math.cos(angle) * radius, 0, math.sin(angle) * radius)
-
-			candidate = Vector3.new(
-				math.clamp(candidate.X, -halfExtent, halfExtent),
-				0,
-				math.clamp(candidate.Z, -halfExtent, halfExtent)
-			)
-
-			local distSq = if #slots == 0 then math.huge else _nearestDistSq(slots, candidate)
-			if distSq >= minSepSq then
-				best = candidate
-				break
-			end
-			if distSq > bestDistSq then
-				bestDistSq = distSq
-				best = candidate
-			end
-		end
-
-		if best then
-			table.insert(slots, best)
+		local candidate = Vector3.new(x, 0, z)
+		if _isClear(grid, candidate, separation) then
+			_insert(grid, candidate)
+			table.insert(points, candidate)
 		end
 	end
 
-	return slots
+	return _spreadOrder(points)
 end
 
 return Field

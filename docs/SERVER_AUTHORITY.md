@@ -11,6 +11,15 @@ A client can *request* ("open this egg", "fire at this position") and *predict*
 and tells everyone through replication. If removing a line of client code could
 give a player free items, that line was on the wrong side.
 
+### Client-only world visuals
+
+Bamboo follows the same rule without replicating thousands of Parts. `BambooService`
+keeps stalk positions, health, rarity, growth, and rewards as server data, then
+sends a compact snapshot plus cut/replant deltas through the Bamboo relay. The
+client derives deterministic slot positions and builds only nearby visuals locally.
+Growth uses a server timestamp, so it does not stream a per-stalk property every
+half second.
+
 ## How state flows here
 
 ```

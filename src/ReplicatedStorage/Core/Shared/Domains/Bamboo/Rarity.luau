@@ -142,6 +142,8 @@ function Rarity.RollVisual(rarityId: string, rng: Random): Types.StalkVisual
 
 	return {
 		rarity = definition.id,
+		-- Callers overwrite this with the stalk's rolled mutation; plain by default.
+		mutation = "None",
 		heightScale = definition.heightScale * (1 + rng:NextNumber(-v.HeightSpread, v.HeightSpread)),
 		thicknessScale = definition.thicknessScale * (1 + rng:NextNumber(-v.ThicknessSpread, v.ThicknessSpread)),
 		tiltDegrees = rng:NextNumber(0, v.MaxTiltDegrees),

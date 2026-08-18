@@ -22,6 +22,7 @@ local Relay = Core:GetShared("Network")
 local Replica = Core:Get("Replica")
 local UI = require(ReplicatedStorage:WaitForChild("UI"))
 local ShadowText = UI:GetModule("ShadowText")
+local AntiCheat = require(script.Parent:WaitForChild("AntiCheatController"))
 
 local BambooHUDController = {}
 
@@ -116,6 +117,8 @@ local function _build()
 	-- Below the authored kit, which has no DisplayOrder set.
 	_screen.DisplayOrder = -1
 	_screen.Parent = LOCAL_PLAYER:WaitForChild("PlayerGui")
+	-- Built at runtime, so the anti-cheat scanner has to be told it is ours.
+	AntiCheat.Approve(_screen)
 
 	-- Combo cluster: count, word, window bar, milestone callout. Held in one
 	-- frame so the whole thing can fade as a unit.

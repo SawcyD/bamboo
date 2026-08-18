@@ -63,7 +63,7 @@ local definitions: { [string]: Definition } = {
 		baseCost = 500,
 		costGrowth = 1.60,
 		maxLevel = 15,
-		effectText = "+3 Bamboo in the field",
+		effectText = "+8 Bamboo in the field",
 	},
 }
 

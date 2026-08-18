@@ -95,9 +95,9 @@ return function(t)
 		end
 	end)
 
-	t.test("density grows the field three stalks at a time", function()
+	t.test("density thickens the field eight stalks at a time", function()
 		t.expect(Bamboo.Value.MaxStalks(0)).toBe(Bamboo.Field.MaxStalks)
-		t.expect(Bamboo.Value.MaxStalks(3)).toBe(Bamboo.Field.MaxStalks + 9)
+		t.expect(Bamboo.Value.MaxStalks(3)).toBe(Bamboo.Field.MaxStalks + 24)
 	end)
 
 	t.test("plots can be pre-built for the largest reachable field", function()
@@ -232,9 +232,10 @@ return function(t)
 		t.expect(Bamboo.Combo.NextRewardAt(500)).toBeNil()
 	end)
 
-	t.test("the combo window is generous enough to cross a clump gap", function()
-		-- Walking between neighbouring clumps must not drop the streak.
-		local walkSeconds = Bamboo.Field.ClumpSeparationStuds / 16
+	t.test("the combo window survives crossing a sparse stretch", function()
+		-- Tied to the sickle's reach rather than a layout tuning knob: crossing
+		-- three reaches' worth of thin forest must not drop the streak.
+		local walkSeconds = Bamboo.Tool.Range * 3 / 16
 		t.expect(Bamboo.Combo.TimeoutSeconds > walkSeconds).toBeTruthy()
 	end)
 
@@ -258,52 +259,87 @@ return function(t)
 		end
 	end)
 
-	t.test("planting clusters rather than gridding", function()
-		local slots = Bamboo.Field.BuildSlots(34, 48, Random.new(11))
+	t.test("the field is planted as a forest, not scattered stalks", function()
+		local slots = Bamboo.Field.BuildSlots(Bamboo.Field.StartingStalks, 48, Random.new(11))
+		t.expect(#slots).toBe(Bamboo.Field.StartingStalks)
 
-		-- In a clustered layout most stalks have a close neighbour. A uniform
-		-- grid over the same area would put everything ~14 studs apart.
-		local close = 0
-		for _, slot in slots do
-			local nearest = math.huge
-			for _, other in slots do
-				if other ~= slot then
-					nearest = math.min(nearest, (other - slot).Magnitude)
+		-- Coverage: sample a grid over the plot and require bamboo near every
+		-- sample, so there are no bald regions.
+		local samples, covered = 0, 0
+		for gx = 0, 9 do
+			for gz = 0, 9 do
+				local point = Vector3.new(-48 + (gx + 0.5) * 9.6, 0, -48 + (gz + 0.5) * 9.6)
+				samples += 1
+				for _, slot in slots do
+					if (slot - point).Magnitude <= 12 then
+						covered += 1
+						break
+					end
 				end
 			end
-			if nearest <= Bamboo.Tool.Range then
-				close += 1
-			end
 		end
-		t.expect(close / #slots > 0.9).toBeTruthy()
+		t.expect(covered / samples > 0.95).toBeTruthy()
 	end)
 
-	t.test("a prefix of a prebuilt field is still clustered", function()
-		-- Plots lay out slots for a fully upgraded field and then plant only the
-		-- first N. That prefix is what a new player actually sees, so it has to
-		-- be as dense as a field built for exactly that count.
+	t.test("density varies, so the forest has thickets and lanes", function()
+		local slots = Bamboo.Field.BuildSlots(Bamboo.Field.StartingStalks, 48, Random.new(12))
+
+		local thinnest, thickest = math.huge, 0
+		for _, slot in slots do
+			local n = 0
+			for _, other in slots do
+				if other ~= slot and (other - slot).Magnitude <= Bamboo.Tool.Range then
+					n += 1
+				end
+			end
+			thinnest = math.min(thinnest, n)
+			thickest = math.max(thickest, n)
+		end
+
+		-- A uniform scatter would have every stalk with the same neighbour count.
+		t.expect(thickest > thinnest + 2).toBeTruthy()
+	end)
+
+	t.test("a prefix of a prebuilt field still covers the whole plot", function()
+		-- Plots lay out slots for a fully upgraded forest and plant only the
+		-- first N, so the prefix has to be spread rather than grown from a corner.
 		local slots = Bamboo.Field.BuildSlots(Bamboo.Value.MaxPossibleStalks(), 48, Random.new(5))
 
-		local neighbours = 0
-		for index = 1, Bamboo.Field.StartingStalks do
-			local slot = slots[index]
-			for other = 1, Bamboo.Field.StartingStalks do
-				if other ~= index and (slots[other] - slot).Magnitude <= Bamboo.Tool.Range then
-					neighbours += 1
+		local samples, covered = 0, 0
+		for gx = 0, 9 do
+			for gz = 0, 9 do
+				local point = Vector3.new(-48 + (gx + 0.5) * 9.6, 0, -48 + (gz + 0.5) * 9.6)
+				samples += 1
+				for index = 1, Bamboo.Field.StartingStalks do
+					if (slots[index] - point).Magnitude <= 12 then
+						covered += 1
+						break
+					end
 				end
 			end
 		end
-
-		-- Every stalk should average at least a full starter multi-hit of
-		-- neighbours, or the rotor drops to idle between every stalk.
-		local average = neighbours / Bamboo.Field.StartingStalks
-		t.expect(average >= Bamboo.Tool.BaseMultiHit).toBeTruthy()
+		t.expect(covered / samples > 0.95).toBeTruthy()
 	end)
 
-	t.test("density still meaningfully grows the field", function()
-		local base = Bamboo.Value.MaxStalks(0)
-		local maxed = Bamboo.Value.MaxPossibleStalks()
-		t.expect(maxed >= base * 2).toBeTruthy()
+	t.test("density meaningfully thickens what the rotor reaches", function()
+		-- Raw stalk count is the wrong measure for a forest: what the player
+		-- feels is how much bamboo is inside the rotor's reach at once.
+		local function reachAt(count: number): number
+			local slots = Bamboo.Field.BuildSlots(count, 48, Random.new(9))
+			local total = 0
+			for _, slot in slots do
+				for _, other in slots do
+					if other ~= slot and (other - slot).Magnitude <= Bamboo.Tool.Range then
+						total += 1
+					end
+				end
+			end
+			return total / #slots
+		end
+
+		local base = reachAt(Bamboo.Value.MaxStalks(0))
+		local maxed = reachAt(Bamboo.Value.MaxPossibleStalks())
+		t.expect(maxed > base * 1.5).toBeTruthy()
 	end)
 
 	-- ── rarity luck ──────────────────────────────────────────────────────────
@@ -327,6 +363,123 @@ return function(t)
 			for _ = 1, 20 do
 				t.expect(Bamboo.Rarity.Roll(a, luck)).toBe(Bamboo.Rarity.Roll(b, luck))
 			end
+		end
+	end)
+
+	-- ── mutations ────────────────────────────────────────────────────────────
+
+	t.test("every mutation in the order is defined and well formed", function()
+		for _, id in Bamboo.Mutations.Order do
+			local m = Bamboo.Mutations.Definitions[id]
+			t.expect(m).toBeTruthy()
+			t.expect(m.weight > 0).toBeTruthy()
+			t.expect(m.valueMultiplier >= 1).toBeTruthy()
+		end
+	end)
+
+	t.test("unknown and nil mutations fall back to None", function()
+		t.expect(Bamboo.Mutations.Get(nil).id).toBe("None")
+		t.expect(Bamboo.Mutations.Get("not_a_mutation").id).toBe("None")
+		t.expect(Bamboo.Mutations.IsMutated(nil)).toBe(false)
+		t.expect(Bamboo.Mutations.IsMutated("None")).toBe(false)
+		t.expect(Bamboo.Mutations.IsMutated("Golden")).toBe(true)
+	end)
+
+	t.test("mutation odds total 100 at every luck level", function()
+		for _, luck in { 0, 1, Bamboo.Mutations.MaxLuck } do
+			local total = 0
+			for _, id in Bamboo.Mutations.Order do
+				total += Bamboo.Mutations.ChanceOf(id, luck)
+			end
+			t.expect(total).toBeCloseTo(100, 0.001)
+		end
+	end)
+
+	t.test("rarer mutations are rarer, and plain bamboo dominates", function()
+		local previous = math.huge
+		for _, id in Bamboo.Mutations.Order do
+			local chance = Bamboo.Mutations.ChanceOf(id, 0)
+			t.expect(chance < previous).toBeTruthy()
+			previous = chance
+		end
+		t.expect(Bamboo.Mutations.ChanceOf("None", 0) > 80).toBeTruthy()
+	end)
+
+	t.test("luck raises rare mutations but never makes them common", function()
+		local maxLuck = Bamboo.Mutations.MaxLuck
+		t.expect(Bamboo.Mutations.ChanceOf("Golden", maxLuck) > Bamboo.Mutations.ChanceOf("Golden", 0)).toBeTruthy()
+		t.expect(Bamboo.Mutations.ChanceOf("Ancient", maxLuck) > Bamboo.Mutations.ChanceOf("Ancient", 0)).toBeTruthy()
+		-- Even fully lucky, the headline mutations stay genuinely rare.
+		t.expect(Bamboo.Mutations.ChanceOf("Golden", maxLuck) < 2).toBeTruthy()
+		t.expect(Bamboo.Mutations.ChanceOf("Ancient", maxLuck) < 1).toBeTruthy()
+	end)
+
+	t.test("luck is clamped, so no caller can push odds past the cap", function()
+		local capped = Bamboo.Mutations.ChanceOf("Ancient", Bamboo.Mutations.MaxLuck)
+		t.expect(Bamboo.Mutations.ChanceOf("Ancient", 9999)).toBeCloseTo(capped, 0.0001)
+	end)
+
+	t.test("mutation rolls are reproducible and always a defined id", function()
+		for _, luck in { 0, 2 } do
+			local a, b = Random.new(77), Random.new(77)
+			for _ = 1, 30 do
+				local rolled = Bamboo.Mutations.Roll(a, luck)
+				t.expect(rolled).toBe(Bamboo.Mutations.Roll(b, luck))
+				t.expect(Bamboo.Mutations.Definitions[rolled]).toBeTruthy()
+			end
+		end
+	end)
+
+	t.test("value multiplies type and mutation exactly once each", function()
+		local yieldLevel = 0
+		local plainNormal = Bamboo.Value.StalkReward("Normal", yieldLevel, "None")
+		local plainThick = Bamboo.Value.StalkReward("Thick", yieldLevel, "None")
+		local goldenThick = Bamboo.Value.StalkReward("Thick", yieldLevel, "Golden")
+
+		t.expect(plainNormal).toBe(Bamboo.Value.YieldPerStalk(yieldLevel))
+		t.expect(plainThick).toBe(plainNormal * Bamboo.Rarity.Get("Thick").rewardMultiplier)
+		t.expect(goldenThick).toBe(plainThick * Bamboo.Mutations.Get("Golden").valueMultiplier)
+	end)
+
+	t.test("omitting the mutation is the same as passing None", function()
+		t.expect(Bamboo.Value.StalkReward("Tall", 3)).toBe(Bamboo.Value.StalkReward("Tall", 3, "None"))
+	end)
+
+	t.test("display names combine mutation and type", function()
+		t.expect(Bamboo.Mutations.DisplayName("Thick", "Golden")).toBe("Golden Thick Bamboo")
+		t.expect(Bamboo.Mutations.DisplayName("Normal", "None")).toBe("Normal Bamboo")
+		t.expect(Bamboo.Mutations.DisplayName("Tall", nil)).toBe("Tall Bamboo")
+	end)
+
+	t.test("only the big mutations get the event treatment", function()
+		t.expect(Bamboo.Mutations.IsEvent("None")).toBe(false)
+		t.expect(Bamboo.Mutations.IsEvent("Dewy")).toBe(false)
+		t.expect(Bamboo.Mutations.IsEvent("Crystal")).toBe(true)
+		t.expect(Bamboo.Mutations.IsEvent("Ancient")).toBe(true)
+	end)
+
+	t.test("every mutation is visually distinct from plain bamboo", function()
+		local plain = Bamboo.Mutations.Get("None")
+		for _, id in Bamboo.Mutations.Collectable do
+			local m = Bamboo.Mutations.Get(id)
+			-- At least two visual channels must differ, or it won't read at speed.
+			local differences = 0
+			if m.color ~= plain.color then
+				differences += 1
+			end
+			if m.nodeColor ~= plain.nodeColor then
+				differences += 1
+			end
+			if m.leafColor ~= plain.leafColor then
+				differences += 1
+			end
+			if m.material ~= plain.material then
+				differences += 1
+			end
+			if m.glow ~= plain.glow then
+				differences += 1
+			end
+			t.expect(differences >= 2).toBeTruthy()
 		end
 	end)
 

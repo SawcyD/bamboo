@@ -17,6 +17,39 @@ end
 
 return {
 	-- Client → server: "I swung here, facing this way."
+	-- Client -> server: asks for the current bamboo state after the client
+	-- controllers are ready. Bamboo is not replicated as Instances; this compact
+	-- snapshot is the only initial visual state a client receives.
+	StateRequest = Channel({
+		bridge = b("StateRequest"),
+		kind = "fire",
+		direction = "c2s",
+		rateLimit = 2,
+	}),
+
+	-- Server -> one client: the initial state (and a complete refresh after a
+	-- density change). Positions are deliberately omitted; clients rebuild the
+	-- deterministic planting layout from the plot index.
+	StateSnapshot = Channel({
+		bridge = b("StateSnapshot"),
+		kind = "fire",
+		direction = "s2c",
+		value = {
+			plots = function(v)
+				return type(v) == "table"
+			end,
+		},
+	}),
+
+	-- Server -> all clients: small state changes only. Growth is represented by a
+	-- server timestamp, so clients do not receive a per-stalk update every frame.
+	StateDelta = Channel({
+		bridge = b("StateDelta"),
+		kind = "fire",
+		direction = "s2all",
+		value = {},
+	}),
+
 	-- The client never says what it hit; the server runs the arc query itself.
 	-- Rate limit is well above the fastest reachable swing rate (~2/s at level 25)
 	-- so honest clients never trip it, but a spammer is still capped.

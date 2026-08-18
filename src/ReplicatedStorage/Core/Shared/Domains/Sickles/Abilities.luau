@@ -68,7 +68,7 @@ function Abilities.Describe(id: string?, potency: number): string?
 	end
 
 	if definition.id == "Magnet" then
-		return string.format("%s — %.0fx drop pickup range", definition.name, Abilities.MagnetRadiusMultiplier)
+		return string.format("%s — %.1fx drop pickup range", definition.name, Abilities.MagnetRadiusMultiplier)
 	end
 	return string.format("%s — %.0f%% chance", definition.name, potency * 100)
 end

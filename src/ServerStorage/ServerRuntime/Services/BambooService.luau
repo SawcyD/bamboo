@@ -12,7 +12,6 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Core = require(ReplicatedStorage:WaitForChild("Core"))
 local Bamboo = Core:GetDomain("Bamboo")
 local Sickles = Core:GetDomain("Sickles")
-local BambooModel = Core:GetShared("BambooModel")
 local Relay = Core:GetShared("Network")
 
 local BambooService = {}
@@ -28,11 +27,18 @@ type Stalk = {
 	Id: number,
 	Slot: CFrame,
 	Rarity: string,
+	-- Rolled independently of Rarity; "None" for plain bamboo.
+	Mutation: string,
+	-- Clients use this seed to build the same cosmetic variation locally. It is
+	-- presentation data, not gameplay authority.
+	VisualSeed: number,
 	Health: number,
 	Stage: number,
-	Model: Model?,
 	-- os.clock() the stalk was cut; nil while it is standing.
 	CutAt: number?,
+	-- workspace:GetServerTimeNow() at the cut, for client-side growth prediction.
+	VisualCutAt: number?,
+	NeedsReplant: boolean,
 	-- Rarity luck captured from the cutter's combo, applied when this stalk
 	-- reseeds. A hot streak leaves behind a richer field.
 	ReplantLuck: number?,
@@ -40,9 +46,10 @@ type Stalk = {
 
 type PlotState = {
 	Plot: any,
-	Folder: Folder,
 	Stalks: { Stalk },
 	Rng: Random,
+	GrowthLevel: number,
+	RegrowSeconds: number,
 }
 
 type SwingState = {
@@ -65,27 +72,74 @@ local _rng = Random.new(os.clock() * 1e6 % 2 ^ 31)
 
 -- ── stalk construction ───────────────────────────────────────────────────────
 
-local function _destroyStalkModel(stalk: Stalk)
-	if stalk.Model then
-		stalk.Model:Destroy()
-		stalk.Model = nil
-	end
+-- Sets the discrete stage (gameplay: only Mature is cuttable). The visual size
+-- is driven separately by GrowthScale, so the model is never snap-scaled here.
+--
+-- The server never constructs bamboo Instances. Clients rebuild the visual from
+-- compact records and the deterministic plot layout.
+local function _stalkRecord(_state: PlotState, stalk: Stalk): any
+	return {
+		id = stalk.Id,
+		rarity = stalk.Rarity,
+		mutation = stalk.Mutation,
+		visualSeed = stalk.VisualSeed,
+		stage = stalk.Stage,
+		cutAt = stalk.VisualCutAt,
+	}
 end
 
--- Builds (or rebuilds) the visual for a stalk at its current stage.
-local function _spawnStalkModel(state: PlotState, stalk: Stalk)
-	_destroyStalkModel(stalk)
+local function _growthFor(plot: any): (number, number)
+	local owner = plot.Owner
+	local growthLevel = 0
+	if owner then
+		local DataService = Framework:GetService("DataService")
+		growthLevel = DataService.Get(owner, "GrowthSpeedLevel") or 0
+	end
+	return growthLevel, Bamboo.Value.RegrowSeconds(growthLevel)
+end
 
-	local visual = Bamboo.Rarity.RollVisual(stalk.Rarity, state.Rng)
-	local model = BambooModel.Build(visual, stalk.Slot, state.Rng)
-	model.Name = "Stalk" .. stalk.Id
-	model:SetAttribute("StalkId", stalk.Id)
-	model:SetAttribute("Stage", stalk.Stage)
-	model:SetAttribute("Rarity", stalk.Rarity)
-	BambooModel.ApplyStage(model, stalk.Stage, stalk.Slot)
-	model.Parent = state.Folder
+local function _snapshot(state: PlotState): any
+	local growthLevel, regrowSeconds = _growthFor(state.Plot)
+	state.GrowthLevel = growthLevel
+	state.RegrowSeconds = regrowSeconds
 
-	stalk.Model = model
+	local stalks = {}
+	for _, stalk in state.Stalks do
+		table.insert(stalks, _stalkRecord(state, stalk))
+	end
+
+	return {
+		plotId = state.Plot.Id,
+		plotIndex = state.Plot.Index,
+		growthLevel = growthLevel,
+		regrowSeconds = regrowSeconds,
+		stalks = stalks,
+	}
+end
+
+local function _sendSnapshot(player: Player)
+	local plots = {}
+	for _, state in _plotStates do
+		table.insert(plots, _snapshot(state))
+	end
+	Relay.Bamboo.StateSnapshot.sendTo({ plots = plots }, player)
+end
+
+local function _broadcastSnapshot(state: PlotState)
+	Relay.Bamboo.StateDelta.sendToAll({
+		kind = "snapshot",
+		plot = _snapshot(state),
+	})
+end
+
+local function _broadcastChanges(changes: { any })
+	if #changes == 0 then
+		return
+	end
+	Relay.Bamboo.StateDelta.sendToAll({
+		kind = "changes",
+		changes = changes,
+	})
 end
 
 local function _setStage(stalk: Stalk, stage: number)
@@ -93,40 +147,41 @@ local function _setStage(stalk: Stalk, stage: number)
 		return
 	end
 	stalk.Stage = stage
-	if stalk.Model then
-		BambooModel.ApplyStage(stalk.Model, stage, stalk.Slot)
-		stalk.Model:SetAttribute("Stage", stage)
-	end
 end
 
 -- Rerolls a cut stalk as a fresh shoot and starts it growing again.
 local function _replant(state: PlotState, stalk: Stalk)
 	stalk.Rarity = Bamboo.Rarity.Roll(state.Rng, stalk.ReplantLuck)
+	-- Type and mutation are separate rolls, so a hot streak's luck can turn up
+	-- a Golden Normal as readily as a Golden Thick.
+	stalk.Mutation = Bamboo.Mutations.Roll(state.Rng, stalk.ReplantLuck)
 	stalk.ReplantLuck = nil
 	stalk.Health = Bamboo.Rarity.Get(stalk.Rarity).health
 	stalk.Stage = Bamboo.Field.Stage.Shoot
-	_spawnStalkModel(state, stalk)
+	stalk.VisualSeed = state.Rng:NextInteger(1, 2147483647)
+	stalk.NeedsReplant = false
 end
 
 -- ── growth ───────────────────────────────────────────────────────────────────
 
--- The owner's Growth Speed level, read once per plot per tick rather than once
--- per stalk.
-local function _growthLevelFor(plot: any): number
-	local owner = plot.Owner
-	if not owner then
-		return 0
-	end
-	local DataService = Framework:GetService("DataService")
-	return DataService.Get(owner, "GrowthSpeedLevel") or 0
-end
-
 local function _tickGrowth()
 	local now = os.clock()
+	local changes = {}
 
 	for _, state in _plotStates do
-		local growthLevel = _growthLevelFor(state.Plot)
-		local regrowSeconds = Bamboo.Value.RegrowSeconds(growthLevel)
+		-- Read the owner level once per plot, not once per stalk. If it changed,
+		-- send one config delta so clients can keep their local growth clock exact.
+		local growthLevel, regrowSeconds = _growthFor(state.Plot)
+		if state.GrowthLevel ~= growthLevel or state.RegrowSeconds ~= regrowSeconds then
+			state.GrowthLevel = growthLevel
+			state.RegrowSeconds = regrowSeconds
+			table.insert(changes, {
+				kind = "config",
+				plotId = state.Plot.Id,
+				growthLevel = growthLevel,
+				regrowSeconds = regrowSeconds,
+			})
+		end
 
 		for _, stalk in state.Stalks do
 			local cutAt = stalk.CutAt
@@ -134,19 +189,28 @@ local function _tickGrowth()
 				continue
 			end
 
-			-- A cut stalk reseeds on the next tick so the ground is never bare for
-			-- long; the stage thresholds then walk it back up to Mature.
-			if stalk.Model == nil then
+			-- A cut stalk reseeds on the next tick. Gameplay stays server-owned while
+			-- the client receives only this one replacement record.
+			if stalk.NeedsReplant then
 				_replant(state, stalk)
+				table.insert(changes, {
+					kind = "stalk",
+					action = "replant",
+					plotId = state.Plot.Id,
+					stalk = _stalkRecord(state, stalk),
+				})
 			end
 
 			local elapsed = now - cutAt
 			_setStage(stalk, Bamboo.Value.StageAt(elapsed, growthLevel))
 			if elapsed >= regrowSeconds then
 				stalk.CutAt = nil
+				stalk.VisualCutAt = nil
 			end
 		end
 	end
+
+	_broadcastChanges(changes)
 end
 
 -- ── combo ────────────────────────────────────────────────────────────────────
@@ -235,7 +299,7 @@ local function _gatherTargets(
 
 	local candidates: { { stalk: Stalk, distSq: number } } = {}
 	for _, stalk in state.Stalks do
-		if stalk.Stage ~= Bamboo.Field.Stage.Mature or stalk.Model == nil then
+		if stalk.Stage ~= Bamboo.Field.Stage.Mature then
 			continue
 		end
 
@@ -271,7 +335,7 @@ local function _findChainTarget(state: PlotState, from: Vector3, alreadyHit: { [
 	local bestDistSq = radiusSq
 
 	for _, stalk in state.Stalks do
-		if alreadyHit[stalk.Id] or stalk.Stage ~= Bamboo.Field.Stage.Mature or stalk.Model == nil then
+		if alreadyHit[stalk.Id] or stalk.Stage ~= Bamboo.Field.Stage.Mature then
 			continue
 		end
 		local distSq = (stalk.Slot.Position - from).Magnitude ^ 2
@@ -317,6 +381,11 @@ local function _onSwing(payload: any, player: Player)
 
 	local swing = _swingStateFor(player)
 	local now = os.clock()
+	local serverNow = workspace:GetServerTimeNow()
+	local growthLevel, regrowSeconds = _growthFor(plot)
+	local growthChanged = state.GrowthLevel ~= growthLevel or state.RegrowSeconds ~= regrowSeconds
+	state.GrowthLevel = growthLevel
+	state.RegrowSeconds = regrowSeconds
 
 	-- Combo bonuses are read from the server's own combo count. The client is
 	-- never asked what its combo is; it is only ever told.
@@ -347,6 +416,15 @@ local function _onSwing(payload: any, player: Player)
 	local dropped = 0
 	local cut = 0
 	local chained = 0
+	local stateChanges = {}
+	if growthChanged then
+		table.insert(stateChanges, {
+			kind = "config",
+			plotId = plot.Id,
+			growthLevel = growthLevel,
+			regrowSeconds = regrowSeconds,
+		})
+	end
 
 	-- Stalks this swing has already touched, so Chain never revisits one.
 	local touched: { [number]: boolean } = {}
@@ -367,7 +445,7 @@ local function _onSwing(payload: any, player: Player)
 				chained += 1
 			end
 
-			local reward = Bamboo.Value.StalkReward(stalk.Rarity, yieldLevel)
+			local reward = Bamboo.Value.StalkReward(stalk.Rarity, yieldLevel, stalk.Mutation)
 			-- Bountiful: a broken stalk sometimes pays out double.
 			if stats.ability == "Bountiful" and _rng:NextNumber() < stats.abilityPotency then
 				reward *= Sickles.Abilities.BountifulMultiplier
@@ -389,17 +467,26 @@ local function _onSwing(payload: any, player: Player)
 			end
 
 			stalk.CutAt = now
+			stalk.VisualCutAt = serverNow
+			stalk.NeedsReplant = true
 			-- Captured now rather than read at replant time, so the luck that
 			-- reseeds this stalk is the luck it was cut at.
 			stalk.ReplantLuck = rewards.rarityLuck
-			_destroyStalkModel(stalk)
 			stalk.Stage = Bamboo.Field.Stage.Shoot
+			table.insert(stateChanges, {
+				kind = "stalk",
+				action = "cut",
+				plotId = plot.Id,
+				stalk = _stalkRecord(state, stalk),
+				regrowSeconds = regrowSeconds,
+			})
 		end
 
 		table.insert(hits, {
 			id = stalk.Id,
 			position = stalk.Slot.Position,
 			rarity = stalk.Rarity,
+			mutation = stalk.Mutation,
 			broke = broke,
 			health = math.max(stalk.Health, 0),
 			chained = viaChain,
@@ -453,6 +540,7 @@ local function _onSwing(payload: any, player: Player)
 	if cut > 0 then
 		DataService.Increment(player, "LifetimeBambooCut", cut)
 	end
+	_broadcastChanges(stateChanges)
 
 	Relay.Bamboo.SwingResult.sendTo({
 		hits = hits,
@@ -470,6 +558,9 @@ function BambooService:Start(fw: any)
 	Framework = fw
 
 	Relay.Bamboo.Swing.listen(_onSwing)
+	Relay.Bamboo.StateRequest.listen(function(_payload: any, player: Player)
+		_sendSnapshot(player)
+	end)
 
 	Players.PlayerRemoving:Connect(function(player: Player)
 		_swingState[player] = nil
@@ -517,15 +608,14 @@ end
 function BambooService.PopulatePlot(plot: any)
 	BambooService.ClearPlot(plot)
 
-	local folder = Instance.new("Folder")
-	folder.Name = "Bamboo"
-	folder.Parent = plot.Model
+	local growthLevel, regrowSeconds = _growthFor(plot)
 
 	local state: PlotState = {
 		Plot = plot,
-		Folder = folder,
 		Stalks = {},
 		Rng = Random.new(os.clock() * 1e6 % 2 ^ 31),
+		GrowthLevel = growthLevel,
+		RegrowSeconds = regrowSeconds,
 	}
 
 	_plotStates[plot.Id] = state
@@ -558,21 +648,24 @@ function BambooService.SyncFieldSize(plot: any)
 			Id = index,
 			Slot = plot.Slots[index],
 			Rarity = rarity,
+			Mutation = Bamboo.Mutations.Roll(state.Rng),
+			VisualSeed = state.Rng:NextInteger(1, 2147483647),
 			Health = Bamboo.Rarity.Get(rarity).health,
 			Stage = Bamboo.Field.Stage.Mature,
-			Model = nil,
 			CutAt = nil,
+			VisualCutAt = nil,
+			NeedsReplant = false,
 		}
 		table.insert(state.Stalks, stalk)
-		_spawnStalkModel(state, stalk)
 	end
 
 	-- Only reachable if Density is ever rebalanced downward; kept so the field
 	-- can never end up with more stalks than the level allows.
 	for index = #state.Stalks, target + 1, -1 do
-		_destroyStalkModel(state.Stalks[index])
 		table.remove(state.Stalks, index)
 	end
+
+	_broadcastSnapshot(state)
 end
 
 --[[
@@ -587,7 +680,7 @@ function BambooService.ClearPlot(plot: any)
 
 	local state = _plotStates[plot.Id]
 	if state then
-		state.Folder:Destroy()
+		Relay.Bamboo.StateDelta.sendToAll({ kind = "clear", plotId = plot.Id })
 		_plotStates[plot.Id] = nil
 	end
 	local stale = plot.Model:FindFirstChild("Bamboo")
