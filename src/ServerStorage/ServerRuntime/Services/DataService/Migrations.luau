@@ -2,6 +2,10 @@
 -- Ordered list of data migrations; append only, never edit or remove existing entries.
 -- Each entry runs once per profile (tracked by id in data._migrations).
 
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Core = require(ReplicatedStorage:WaitForChild("Core"))
+local Bamboo = Core:GetDomain("Bamboo")
+
 type MigrationEntry = {
 	id: string,
 	desc: string,
@@ -85,6 +89,83 @@ local migrations: { MigrationEntry } = {
 		run = function(data: any): any
 			if type(data.HighestCombo) ~= "number" then
 				data.HighestCombo = 0
+			end
+			return data
+		end,
+	},
+
+	{
+		id = "v7_processing",
+		desc = "Add the Raw Bamboo -> Straw processor's input and output buffers",
+		run = function(data: any): any
+			for _, key in { "ProcessorInput", "StrawStock" } do
+				if type(data[key]) ~= "number" then
+					data[key] = 0
+				end
+			end
+			return data
+		end,
+	},
+
+	{
+		id = "v8_stockpile_processing_flow",
+		desc = "Replace Bag/StorageLevel/StrawStock with the stockpile -> carry -> processor -> earnings loop",
+		run = function(data: any): any
+			-- Raw bamboo that was sitting in the bag becomes stockpile.
+			local bag = data.Bag
+			if type(data.BambooStock) ~= "number" then
+				data.BambooStock = 0
+			end
+			if type(bag) == "number" then
+				data.BambooStock += bag
+			end
+			data.Bag = nil
+
+			if type(data.CarriedBamboo) ~= "number" then
+				data.CarriedBamboo = 0
+			end
+
+			-- Storage level becomes Carry level: same progression, new purpose.
+			if type(data.CarryLevel) ~= "number" then
+				local storageLevel = data.StorageLevel
+				data.CarryLevel = if type(storageLevel) == "number" then storageLevel else 0
+			end
+			data.StorageLevel = nil
+
+			if type(data.ProcessorInput) ~= "number" then
+				data.ProcessorInput = 0
+			end
+
+			-- Any Straw already produced is sold into pending earnings rather than
+			-- lost, using the same sell-value formula the processor itself uses.
+			if type(data.PendingEarnings) ~= "number" then
+				data.PendingEarnings = 0
+			end
+			local straw = data.StrawStock
+			if type(straw) == "number" and straw > 0 then
+				data.PendingEarnings += Bamboo.Processing.SellValue(straw)
+			end
+			data.StrawStock = nil
+
+			return data
+		end,
+	},
+
+	{
+		id = "v9_unlimited_carry",
+		desc = "Remove CarryLevel: carrying bamboo has no capacity limit, so the Carry upgrade no longer exists",
+		run = function(data: any): any
+			data.CarryLevel = nil
+			return data
+		end,
+	},
+
+	{
+		id = "v10_processing_speed",
+		desc = "Add the Processing Speed upgrade level, replacing the removed Carry upgrade's board slot",
+		run = function(data: any): any
+			if type(data.ProcessingSpeedLevel) ~= "number" then
+				data.ProcessingSpeedLevel = 0
 			end
 			return data
 		end,

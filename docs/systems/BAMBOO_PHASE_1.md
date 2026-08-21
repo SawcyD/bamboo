@@ -1,26 +1,29 @@
 # Bamboo Farm — Phase 1
 
-The whole loop: cut → collect → fill bag → sell → upgrade → cut faster.
+The whole loop: cut → collect → fill bag → process into Straw → sell → upgrade
+→ cut faster.
 
 ## Files
 
 | Layer  | File | Job |
 | ------ | ---- | --- |
-| Shared | `Core/Shared/Domains/Bamboo/` | The domain: `Field`, `Rarity`, `Drops`, `Tool`, `Upgrades`, `Economy`, `Value`, `Types`. Reached with `Core:GetDomain("Bamboo")`. |
+| Shared | `Core/Shared/Domains/Bamboo/` | The domain: `Field`, `Rarity`, `Drops`, `Tool`, `Upgrades`, `Economy`, `Processing`, `Value`, `Types`. Reached with `Core:GetDomain("Bamboo")`. |
 | Shared | `Core/Shared/Domains/Sickles/` | Tiers, abilities, the sickle catalog, and `Stats.Compute`. |
 | Shared | `Core/Shared/Domains/Crates/` | Crate catalog and pure odds helpers. |
 | Shared | `Core/Shared/BambooModel.luau` | Procedural stalk builder + growth-stage scaling (presentation, so it sits outside the domain and reads from it). |
 | Shared | `Core/Shared/Network/Events/Bamboo.luau` | `Swing`, `SwingResult`, `BuyUpgrade`, `UpgradeResult`, `Sold`. |
 | Server | `Services/PlotService.luau` | Plot allocation, ground/field/sell-zone/board geometry, spawn placement. |
 | Server | `Services/BambooService.luau` | Stalk state, growth, swing resolution, yield into the bag. |
-| Server | `Services/FarmEconomyService.luau` | Sell-zone polling and upgrade purchases. |
+| Server | `Services/FarmEconomyService.luau` | Sell-zone polling (raw bamboo + Straw in one payout) and upgrade purchases. |
+| Server | `Services/ProcessingService.luau` | Processor deposit-by-proximity and the per-plot batch clock. |
 | Server | `Services/DropService.luau` | Ground drops: spawn, merge, despawn, and proximity pickup. |
 | Server | `Services/SickleService.luau` | Sickle ownership, equipping, and the one place swing stats resolve. |
 | Server | `Services/CrateService.luau` | Charges, rolls, and grants crate openings. |
 | Server | `Services/LuckService.luau` | Recomputes each player's luck from boosts and friends. |
 | Client | `Controllers/SickleController.luau` | Builds the sickle and spins it around the player as a never-stopping rotor; one swing per revolution. |
 | Client | `Controllers/BambooFXController.luau` | All cutting feel: particles, debris, collection flight, shake, reward numbers. |
-| Client | `Controllers/BambooHUDController.luau` | Binds the authored Cash/Backpack HUD; owns combo and the BAG FULL arrow. |
+| Client | `Controllers/BambooHUDController.luau` | Binds the authored Cash/Backpack HUD; owns combo and the one guidance arrow (bag-full → processor, Straw-ready → sell zone). |
+| Client | `Controllers/ProcessorController.luau` | Processor idle/active feel, deposit flight, product pops, full/blocked pulses. |
 | Client | `Controllers/BambooDropController.luau` | Bobbing/spinning drop piles, expiry blink, pickup burst. |
 | Client | `Controllers/CrateController.luau` | Binds the authored OpenBoxes panel and runs the reveal reel. |
 | Client | `Controllers/UpgradeBoardController.luau` | Per-board billboard, the `[E]` prompt, and a tappable cost button. |
@@ -49,6 +52,7 @@ Everything worth changing during playtests lives in one module of the domain:
 | `Tool.luau` | Damage, base swing time, range, base multi-hit, and the rotor's orbit radius / height / spin-up. `SwingArcDegrees` is 360, which disables the directional cone on both client and server; drop it below 360 for a facing-limited swing. |
 | `Upgrades.luau` | The six upgrade definitions: base cost, cost growth, max level, effect text. |
 | `Economy.luau` | Bag capacity, money per bamboo, combo window. |
+| `Processing.luau` | Batch input/output amounts, batch time, buffer caps, Straw sell value. |
 | `Value.luau` | Every derived number: `SwingTime`, `MultiHitTargets`, `YieldPerStalk`, `StalkReward`, `BagCapacity`, `RegrowSeconds`, `StageAt`, `MaxStalks`, `UpgradeCost`, `StatAtLevel`, `CanUpgrade`. |
 
 Nothing outside `Value` should reimplement a formula — the client's upgrade
@@ -96,6 +100,42 @@ Density needs plots to be laid out for a *fully upgraded* field up front:
 `BambooService.SyncFieldSize` plants into the unused ones when the upgrade is
 bought. Growth Speed is read per plot per growth tick from the owner's level, so
 each player's field grows at their own rate.
+
+## Processing
+
+The loop extends one step: cut → collect raw bamboo → **process into Straw** →
+sell Straw (raw bamboo stays sellable directly too, at a lower rate — it is
+never a dead end, only a worse trade than processing).
+
+One machine, one recipe: **Raw Bamboo → Straw**, all configured in
+`Processing.luau` next to `Economy.luau`.
+
+| | Value | Note |
+| --- | --- | --- |
+| Input / output per batch | 10 → 5 | All-or-nothing; a batch never consumes or produces a fraction of itself |
+| Batch time | 6s | ≈1.67 bamboo/s consumed, deliberately slower than level-0 harvesting (≈2.5 bamboo/s) so cutting always outpaces the machine |
+| Input buffer / output buffer | 100 / 50 | Output caps lower on purpose — hitting "full" is meant to happen |
+| Straw sell value | 3 | 1.5 money per raw-bamboo-equivalent vs raw bamboo's 1 — the entire incentive to process |
+
+Both buffers (`ProcessorInput`, `StrawStock`) are ordinary top-level
+`PlayerData` keys, replicated to the owner exactly like `Bag` and `Money` — no
+processing-specific network channel exists. `ProcessorController` only ever
+*reacts* to the replica; it never decides an amount.
+
+`ProcessingService` runs two ticks, both mirroring an existing pattern rather
+than inventing one:
+
+- **Deposit** (0.35s, same cadence as the sell-zone poll) — standing at the
+  processor moves `min(Bag, InputRoom)` into `ProcessorInput`. Idempotent: a
+  player parked on the pad just moves nothing once either side is exhausted.
+- **Batch** (per-plot clock, ticked at 1Hz) — every plot with an online owner,
+  enough input, and output room converts one batch. A plot with no owner (its
+  player left) has its clock dropped rather than advanced, which is the entire
+  offline-processing rule — there is no separate flag for it.
+
+`FarmEconomyService.SellBag` sells both Bag and `StrawStock` in one payout, so
+selling is still the single place money moves; nothing new was added there
+besides two more numbers going into the same total.
 
 ## Field planting
 

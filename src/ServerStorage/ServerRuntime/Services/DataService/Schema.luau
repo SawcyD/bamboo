@@ -6,12 +6,22 @@ export type PlayerData = {
 	Settings: { [string]: any },
 
 	Money: number,
-	Bag: number,
+	-- Raw bamboo stored at the farm, waiting to be carried to the processor.
+	-- Effectively unlimited capacity — harvesting never overflows it.
+	BambooStock: number,
+	-- Raw bamboo physically carried by the player right now, between the
+	-- stockpile and the processor. No capacity limit.
+	CarriedBamboo: number,
+	-- Raw bamboo deposited into the processor, awaiting a batch.
+	ProcessorInput: number,
+	-- Money earned from sold Straw, waiting to be collected at the Cash
+	-- Collector before it becomes spendable Money.
+	PendingEarnings: number,
 	SwingSpeedLevel: number,
 	MultiHitLevel: number,
 	YieldLevel: number,
-	StorageLevel: number,
 	GrowthSpeedLevel: number,
+	ProcessingSpeedLevel: number,
 	DensityLevel: number,
 	LifetimeBambooCut: number,
 	LifetimeBambooCollected: number,
@@ -33,7 +43,7 @@ export type PlayerData = {
 
 local Schema = {}
 
-Schema.DEFAULT_VERSION = 6
+Schema.DEFAULT_VERSION = 10
 
 Schema.defaultData = {
 
@@ -45,12 +55,15 @@ Schema.defaultData = {
 
 	-- Phase 1 farm progression
 	Money = 0,
-	Bag = 0,
+	BambooStock = 0,
+	CarriedBamboo = 0,
+	ProcessorInput = 0,
+	PendingEarnings = 0,
 	SwingSpeedLevel = 0,
 	MultiHitLevel = 0,
 	YieldLevel = 0,
-	StorageLevel = 0,
 	GrowthSpeedLevel = 0,
+	ProcessingSpeedLevel = 0,
 	DensityLevel = 0,
 	LifetimeBambooCut = 0,
 	LifetimeBambooCollected = 0,

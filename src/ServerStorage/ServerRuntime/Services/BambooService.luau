@@ -406,10 +406,6 @@ local function _onSwing(payload: any, player: Player)
 		return
 	end
 
-	local DropService = Framework:GetService("DropService")
-	local bag = DataService.Get(player, "Bag") or 0
-	local capacity = Bamboo.Value.BagCapacity(DataService.Get(player, "StorageLevel") or 0)
-
 	local hits: { any } = {}
 	local breaks = 0
 	local collected = 0
@@ -454,17 +450,9 @@ local function _onSwing(payload: any, player: Player)
 			-- real on 2-bamboo stalks. The maths lives in the domain.
 			reward, swing.ValueRemainder = Bamboo.Combo.ApplyValueBonus(reward, rewards.value, swing.ValueRemainder)
 
-			local room = math.max(capacity - bag - collected, 0)
-			local taken = math.min(reward, room)
-			collected += taken
-
-			-- Anything the bag couldn't hold falls where the stalk stood, so a
-			-- full bag costs you a trip rather than the bamboo itself.
-			local overflow = reward - taken
-			if overflow > 0 then
-				DropService.Spawn(plot, stalk.Slot.Position, overflow, stalk.Rarity)
-				dropped += overflow
-			end
+			-- The stockpile has effectively unlimited capacity, so a broken stalk
+			-- always pays out in full — there is no bag to overflow.
+			collected += reward
 
 			stalk.CutAt = now
 			stalk.VisualCutAt = serverNow
@@ -534,7 +522,7 @@ local function _onSwing(payload: any, player: Player)
 	end
 
 	if collected > 0 then
-		DataService.Increment(player, "Bag", collected)
+		DataService.Increment(player, "BambooStock", collected)
 		DataService.Increment(player, "LifetimeBambooCollected", collected)
 	end
 	if cut > 0 then

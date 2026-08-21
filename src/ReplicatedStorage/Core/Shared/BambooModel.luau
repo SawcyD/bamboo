@@ -12,14 +12,48 @@ local BambooTypes = require(BambooFolder:WaitForChild("Types"))
 
 local BambooModel = {}
 
-local SEGMENT_COUNT = 4
-local BASE_HEIGHT = 9 -- studs, a Normal mature stalk at variation 1.0
-local BASE_DIAMETER = 0.65
+--[[
+	Stalk proportions, in one place.
+
+	Height is expressed as `BaseHeight * HeightMultiplier` rather than as a single
+	tuned number so the original Phase 1 scale stays visible and the forest can be
+	made taller or shorter by moving one value. Segment count is *derived* from the
+	finished height instead of fixed, which is what lets a Tall stalk break into
+	visibly more joints than a Normal one without a second code path.
+]]
+BambooModel.Config = table.freeze({
+	-- Studs, a Normal mature stalk at variation 1.0, before the multiplier.
+	BaseHeight = 9,
+	-- Forest scale. 2.0 puts a Normal stalk at 18 studs and a Tall near 28 — high
+	-- enough to close the canopy overhead, while the rotor orbits at chest height
+	-- and the stalk bases stay clear, so targeting and the sell direction still
+	-- read from inside the field.
+	HeightMultiplier = 2.0,
+	BaseDiameter = 0.65,
+
+	-- Target studs per visual segment. The joint spacing the cascade breaks at.
+	StudsPerSegment = 3.5,
+	-- A stalk always has at least this many joints to cascade through, and never
+	-- more than this many — the cap is a part-count ceiling as much as an art
+	-- decision, since a full field multiplies whatever this is by ~180.
+	MinSegments = 3,
+	MaxSegments = 8,
+})
+
+local CONFIG = BambooModel.Config
+local BASE_HEIGHT = CONFIG.BaseHeight * CONFIG.HeightMultiplier
+local BASE_DIAMETER = CONFIG.BaseDiameter
 local NODE_COLOR_DARKEN = 0.22
 local LEAF_SIZE = Vector3.new(0.08, 1.5, 0.55)
 -- Mutations at or above this glow get a PointLight, so only the genuinely rare
 -- ones cost a light.
 local AURA_GLOW_THRESHOLD = 0.5
+
+-- How many joints a stalk of this height breaks into.
+local function _segmentCountFor(height: number): number
+	local count = math.round(height / CONFIG.StudsPerSegment)
+	return math.clamp(count, CONFIG.MinSegments, CONFIG.MaxSegments)
+end
 
 export type StalkVisual = BambooTypes.StalkVisual
 
@@ -89,7 +123,10 @@ end
 local function _buildStalkParts(model: Model, baseCFrame: CFrame, visual: StalkVisual, rng: Random)
 	local height = BASE_HEIGHT * visual.heightScale
 	local diameter = BASE_DIAMETER * visual.thicknessScale
-	local segmentHeight = height / SEGMENT_COUNT
+	-- Derived, not fixed: a Tall stalk earns more joints purely by being taller,
+	-- so its cascade is naturally longer than a Normal one's.
+	local segmentCount = _segmentCountFor(height)
+	local segmentHeight = height / segmentCount
 	local style = _mutationStyle(visual)
 	local nodeColor = style.nodeColor
 
@@ -102,20 +139,27 @@ local function _buildStalkParts(model: Model, baseCFrame: CFrame, visual: StalkV
 
 	local trunk: Part? = nil
 
-	for i = 1, SEGMENT_COUNT do
+	for i = 1, segmentCount do
 		local centreY = (i - 0.5) * segmentHeight
 		-- Cylinders extend along X, so rotate 90° to stand them up.
 		local segment = _newSegment("Segment" .. i, Vector3.new(segmentHeight * 0.94, diameter, diameter), style.color)
 		segment.Material = style.material
 		segment.CFrame = stalkCFrame * CFrame.new(0, centreY, 0) * CFrame.Angles(0, 0, math.rad(90))
+		-- Which joint this part belongs to. The cascade groups the model by this
+		-- rather than by name, so nodes and leaves travel with their segment.
+		segment:SetAttribute("SegmentIndex", i)
 		segment.Parent = model
 		trunk = trunk or segment
 
-		-- Node ring between segments reads as a bamboo joint at any distance.
-		if i < SEGMENT_COUNT then
+		-- Node ring between segments reads as a bamboo joint at any distance, and
+		-- marks exactly where the stalk is about to snap.
+		if i < segmentCount then
 			local node =
 				_newSegment("Node" .. i, Vector3.new(diameter * 0.35, diameter * 1.18, diameter * 1.18), nodeColor)
 			node.CFrame = stalkCFrame * CFrame.new(0, i * segmentHeight, 0) * CFrame.Angles(0, 0, math.rad(90))
+			-- The joint at the top of segment i goes with segment i, so a detaching
+			-- segment carries its own cap.
+			node:SetAttribute("SegmentIndex", i)
 			node.Parent = model
 		end
 	end
@@ -129,6 +173,8 @@ local function _buildStalkParts(model: Model, baseCFrame: CFrame, visual: StalkV
 			* CFrame.Angles(0, yaw, math.rad(rng:NextNumber(35, 75)))
 			* CFrame.new(0, LEAF_SIZE.Y * 0.5, 0)
 		leaf.Size = LEAF_SIZE * Vector3.new(1, rng:NextNumber(0.75, 1.3), rng:NextNumber(0.8, 1.2))
+		-- Leaves ride the segment they sprout from, so they fall with it.
+		leaf:SetAttribute("SegmentIndex", math.clamp(math.ceil(heightAlong / segmentHeight), 1, segmentCount))
 		leaf.Parent = model
 	end
 
@@ -162,6 +208,9 @@ local function _buildStalkParts(model: Model, baseCFrame: CFrame, visual: StalkV
 	model:SetAttribute("StageScale", 1)
 	model:SetAttribute("Height", height)
 	model:SetAttribute("Diameter", diameter)
+	-- Read by the cascade to know how many joints to break and where each one is.
+	model:SetAttribute("SegmentCount", segmentCount)
+	model:SetAttribute("SegmentHeight", segmentHeight)
 end
 
 -- ── public API ───────────────────────────────────────────────────────────────

@@ -20,6 +20,7 @@ return {
 	Tool = require(script:WaitForChild("Tool")),
 	Upgrades = require(script:WaitForChild("Upgrades")),
 	Economy = require(script:WaitForChild("Economy")),
+	Processing = require(script:WaitForChild("Processing")),
 	Combo = require(script:WaitForChild("Combo")),
 	Value = require(script:WaitForChild("Value")),
 }

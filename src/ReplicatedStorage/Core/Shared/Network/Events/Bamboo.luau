@@ -51,8 +51,13 @@ return {
 	}),
 
 	-- The client never says what it hit; the server runs the arc query itself.
-	-- Rate limit is well above the fastest reachable swing rate (~2/s at level 25)
-	-- so honest clients never trip it, but a spammer is still capped.
+	--
+	-- The fastest honest rate is 1 / (BaseSwingTime / (1 + 25 * 0.08)) = 3.75/s at
+	-- Swing Speed 25, so this leaves ~2.1x headroom — narrower than it looks. It
+	-- was tripped in practice by a client frame hitch: the rotor banked a hitch's
+	-- worth of revolutions and drained them one per frame as a packet burst. The
+	-- controller now clamps its timestep so that cannot happen. Anything still
+	-- reaching 8/s is not an honest client.
 	Swing = Channel({
 		bridge = b("Swing"),
 		kind = "fire",
@@ -85,7 +90,10 @@ return {
 			collected = function(v)
 				return type(v) == "number" and v >= 0
 			end,
-			-- Bamboo the bag couldn't hold, which landed on the ground instead.
+			-- Always 0: the stockpile has no capacity, so nothing is ever dropped
+			-- from harvesting. Kept in the payload rather than removed, so a
+			-- future overflow source (a rare event, an ability) has somewhere to
+			-- report through without a channel change.
 			dropped = function(v)
 				return type(v) == "number" and v >= 0
 			end,
@@ -149,7 +157,37 @@ return {
 		},
 	}),
 
-	-- Server → owner: the result of a sell, so the HUD can play the payout beat.
+	-- Client → server: "I'm at my stockpile, give me bamboo to carry." The
+	-- client never says how much — the server fills remaining carry capacity
+	-- from BambooStock itself. No payload: intent only.
+	TakeFromStockpile = Channel({
+		bridge = b("TakeFromStockpile"),
+		kind = "fire",
+		direction = "c2s",
+		rateLimit = 4,
+	}),
+
+	-- Client → server: "I'm at my processor, take what I'm carrying." Moves all
+	-- of CarriedBamboo into ProcessorInput; the amount is never client-supplied.
+	DepositToProcessor = Channel({
+		bridge = b("DepositToProcessor"),
+		kind = "fire",
+		direction = "c2s",
+		rateLimit = 4,
+	}),
+
+	-- Client → server: "collect my pending earnings." Proximity to the Cash
+	-- Collector is also polled server-side (walking onto the pad is enough),
+	-- so this is a redundant, explicit path for an interact prompt/tap.
+	CollectEarnings = Channel({
+		bridge = b("CollectEarnings"),
+		kind = "fire",
+		direction = "c2s",
+		rateLimit = 4,
+	}),
+
+	-- Server → owner: pending earnings were collected into spendable Money, so
+	-- the HUD/FX can play the payout beat at the Cash Collector.
 	Sold = Channel({
 		bridge = b("Sold"),
 		kind = "fire",

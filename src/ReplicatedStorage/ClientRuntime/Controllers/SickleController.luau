@@ -23,6 +23,7 @@ local SicklesFolder =
 local SickleTypes = require(SicklesFolder:WaitForChild("Types"))
 local Relay = Core:GetShared("Network")
 local Replica = Core:Get("Replica")
+local FeelConfig = require(script.Parent.Parent:WaitForChild("Configs"):WaitForChild("FeelConfig"))
 
 local SickleController = {}
 local Framework: any
@@ -64,6 +65,19 @@ local _visualSickleId: string? = nil
 local _targetScanAt = -math.huge
 local _targetInReach = false
 local TARGET_SCAN_SECONDS = 0.12
+
+local ROTOR = FeelConfig.Rotor
+-- Angular jolt from a server-confirmed hit, and the outward shove from a break.
+-- Both are springs so contact reads as the blade being *resisted* by the stalk
+-- rather than passing through it. Client-side reaction to a server-confirmed
+-- packet only: nothing here fires on a swing the server rejected.
+local _recoilSpring = Spring.new(0, ROTOR.RecoilSmoothTime)
+local _pushSpring = Spring.new(0, ROTOR.RecoilSmoothTime)
+local _recoil = 0
+local _push = 0
+-- Last combo heat the trail width was rebuilt for. Tracked so the NumberSequence
+-- is only reallocated when the width visibly changes.
+local _trailHeat = -1
 
 -- ── tool construction ────────────────────────────────────────────────────────
 
@@ -150,12 +164,25 @@ local function _poseRotor(root: BasePart)
 	local height = IDLE_HEIGHT + (sickle.OrbitHeight - IDLE_HEIGHT) * wind
 	local angle = _angle
 
+	-- Idle bob: a parked rotor still breathes, so "ready" never reads as "off".
+	-- It fades out as the rotor winds up, because a bobbing cutting rotor would
+	-- fight the orbit rather than add to it.
+	if ROTOR.BobStuds > 0 then
+		local bobAmount = if ROTOR.BobFadeWithWind then (1 - wind) else 1
+		height += math.sin(os.clock() * ROTOR.BobFrequency * math.pi * 2) * ROTOR.BobStuds * bobAmount
+	end
+
+	-- A break shoves the blade outward, then it springs back in.
+	radius += _push
+
 	local centre = root.Position + Vector3.new(0, height, 0)
 	local offset = Vector3.new(math.cos(angle), 0, math.sin(angle)) * radius
 	-- Blade leads the orbit and tips outward with speed, so the rotor reads as
 	-- one continuous arc rather than a part being dragged in a circle.
 	local facing = CFrame.lookAt(centre + offset, centre + offset + Vector3.new(-math.sin(angle), 0, math.cos(angle)))
-	handle.CFrame = facing * CFrame.Angles(MAX_BLADE_PITCH * wind, 0, 0)
+	-- The recoil rides on the same pitch axis the windup uses, so a hit reads as
+	-- the blade being knocked back out of its cutting attitude.
+	handle.CFrame = facing * CFrame.Angles(MAX_BLADE_PITCH * wind - _recoil, 0, 0)
 
 	local blade = model:FindFirstChild("Blade") :: BasePart?
 	if blade then
@@ -164,7 +191,21 @@ local function _poseRotor(root: BasePart)
 
 	if _trail then
 		-- Always on, but only reads as a blur once the rotor is at cutting speed.
-		_trail.Lifetime = 0.10 + 0.20 * wind
+		-- A hot combo stretches and fattens the streak, so a long streak is
+		-- visible in the tool itself rather than only on the HUD.
+		local heat = Bamboo.Combo.Heat(_combo)
+		_trail.Lifetime = 0.10 + 0.20 * wind + ROTOR.ComboTrailLifetimeBonus * heat
+
+		-- WidthScale needs a fresh NumberSequence, which is an allocation. Rebuild
+		-- it only when the combo has actually moved the width enough to see,
+		-- rather than allocating one every frame for an identical curve.
+		if math.abs(heat - _trailHeat) > 0.02 then
+			_trailHeat = heat
+			_trail.WidthScale = NumberSequence.new({
+				NumberSequenceKeypoint.new(0, 1 + ROTOR.ComboTrailWidthBonus * heat),
+				NumberSequenceKeypoint.new(1, 0.1),
+			})
+		end
 	end
 end
 
@@ -275,7 +316,23 @@ end
 
 -- ── frame ────────────────────────────────────────────────────────────────────
 
-local function _onRenderStep(dt: number)
+-- Longest frame the rotor will integrate in one step.
+--
+-- Two things go wrong without this. The springs take a single huge step and
+-- overshoot; and, worse, `_sweepProgress` banks a full second's worth of
+-- revolutions during a hitch and then drains them one-per-frame at 60fps, firing
+-- a burst of Swing packets. At Swing Speed 25 the honest sustained rate is
+-- already 3.75/s against a limit of 8/s, so one banked second is enough to trip
+-- the server's rate limiter — which is exactly what a frame spike used to do.
+--
+-- Clamping is also the more correct reading: swings the player "missed" while
+-- the client was frozen did not happen, so they should not all arrive at once.
+local MAX_STEP_SECONDS = 0.1
+
+local function _onRenderStep(rawDt: number)
+	-- Every consumer below (springs, rotor angle, swing cadence) uses the clamped
+	-- step, so a hitch can never bank more than a fraction of a swing.
+	local dt = math.min(rawDt, MAX_STEP_SECONDS)
 	local character = LOCAL_PLAYER.Character
 	local root = character and character:FindFirstChild("HumanoidRootPart") :: BasePart?
 	local humanoid = character and character:FindFirstChildOfClass("Humanoid")
@@ -290,6 +347,11 @@ local function _onRenderStep(dt: number)
 	-- sustained harvesting visibly escalates.
 	_breakEnergy = math.max(_breakEnergy - BREAK_ENERGY_DECAY * dt, 0)
 	local comboBonus = Bamboo.Combo.Heat(_combo) * MAX_COMBO_SPIN_BONUS
+
+	-- Contact reactions settle back to zero on their own; the springs are only
+	-- ever pushed by a confirmed SwingResult.
+	_recoil = math.clamp(_recoilSpring:Update(dt), -ROTOR.MaxRecoilRadians, ROTOR.MaxRecoilRadians)
+	_push = _pushSpring:Update(dt)
 
 	_spinSpring.Target = if _hasTargetInReach(root) then 1 + comboBonus + _breakEnergy else IDLE_SPIN
 	_spin = _spinSpring:Update(dt)
@@ -313,7 +375,10 @@ local function _onRenderStep(dt: number)
 	if _sweepProgress < 1 then
 		return
 	end
-	_sweepProgress -= 1
+	-- Drop any surplus rather than carrying it. With dt clamped this can only be a
+	-- fraction of a swing, but discarding it means a run of long frames can never
+	-- accumulate a debt that later drains as a packet burst.
+	_sweepProgress = 0
 
 	Relay.Bamboo.Swing.send({
 		origin = root.Position,
@@ -334,6 +399,12 @@ local function _onCharacter(character: Model)
 	_sweepProgress = 0
 	_breakEnergy = 0
 	_visualSickleId = nil
+	-- Clear contact state, so a rotor mid-recoil when the character died does not
+	-- come back jolted on respawn.
+	_recoilSpring:Reset(0)
+	_pushSpring:Reset(0)
+	_recoil = 0
+	_push = 0
 end
 
 function SickleController:Start(fw: any)
@@ -348,10 +419,26 @@ function SickleController:Start(fw: any)
 	end)
 
 	-- Each break gives the rotor a small kick, so a big swing is felt in the
-	-- tool as well as on screen.
+	-- tool as well as on screen. This is the server's resolved packet, so the
+	-- rotor never reacts to a swing the server threw away.
 	Relay.Bamboo.SwingResult.listen(function(payload: any)
-		if payload.breaks > 0 then
-			_breakEnergy = math.min(_breakEnergy + payload.breaks * BREAK_ENERGY_PER_BREAK, MAX_BREAK_ENERGY)
+		if not FeelConfig.Enabled.RotorFeel then
+			return
+		end
+
+		local breaks = payload.breaks :: number
+		local contacts = #(payload.hits :: { any })
+
+		if breaks > 0 then
+			_breakEnergy = math.min(_breakEnergy + breaks * BREAK_ENERGY_PER_BREAK, MAX_BREAK_ENERGY)
+			-- Felling something is the strong beat: a harder jolt plus an outward
+			-- shove, both short-lived.
+			_recoilSpring:Impulse(ROTOR.BreakRecoilRadians * math.min(breaks, 3))
+			_pushSpring:Impulse(ROTOR.BreakPushStuds * math.min(breaks, 3))
+		elseif contacts > 0 then
+			-- Connected without felling: a smaller jolt, so chewing through a
+			-- three-health stalk still registers in the hand on every hit.
+			_recoilSpring:Impulse(ROTOR.HitRecoilRadians * math.min(contacts, 3))
 		end
 	end)
 

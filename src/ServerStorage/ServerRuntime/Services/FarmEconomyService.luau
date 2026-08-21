@@ -1,9 +1,13 @@
 --!strict
--- Selling and upgrade purchases — the two places money moves in Phase 1.
+-- Collecting earnings and buying upgrades — the two places money moves.
 --
--- Both are fully server-decided: the sell zone is polled server-side from the
--- character's position, and upgrade costs are recomputed from the player's
+-- Both are fully server-decided: the Cash Collector is polled server-side from
+-- the character's position, and upgrade costs are recomputed from the player's
 -- stored level rather than trusted from the request.
+--
+-- Money is never created anywhere else. Straw sells itself automatically as
+-- soon as a batch completes (ProcessingService), landing in PendingEarnings;
+-- this service is the only place PendingEarnings ever becomes spendable Money.
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
@@ -16,42 +20,45 @@ local Relay = Core:GetShared("Network")
 local FarmEconomyService = {}
 local Framework
 
-local SELL_TICK_SECONDS = 0.35
--- Extra radius around the sell pad so players don't have to stand dead centre.
-local SELL_PAD_PADDING = 3
+local COLLECT_TICK_SECONDS = 0.35
+-- Extra radius around the pad so players don't have to stand dead centre.
+local COLLECTOR_PADDING = 3
 
--- ── selling ──────────────────────────────────────────────────────────────────
+-- ── collecting earnings ─────────────────────────────────────────────────────
 
-local function _isInSellZone(root: BasePart, sellZone: BasePart): boolean
-	local offset = sellZone.CFrame:PointToObjectSpace(root.Position)
-	local half = sellZone.Size * 0.5
-	return math.abs(offset.X) <= half.X + SELL_PAD_PADDING
-		and math.abs(offset.Z) <= half.Z + SELL_PAD_PADDING
+local function _isAtCollector(root: BasePart, collector: BasePart): boolean
+	local offset = collector.CFrame:PointToObjectSpace(root.Position)
+	local half = collector.Size * 0.5
+	return math.abs(offset.X) <= half.X + COLLECTOR_PADDING
+		and math.abs(offset.Z) <= half.Z + COLLECTOR_PADDING
 		and math.abs(offset.Y) <= 8
 end
 
 --[[
-	Empties a player's bag into money. Safe to call when the bag is empty.
-	@param player Player The seller.
-	@return number Bamboo sold (0 when there was nothing to sell).
+	Moves a player's pending earnings into their spendable Money. Safe to call
+	when there is nothing pending (a no-op).
+	@param player Player The collector.
+	@return number Money actually collected (0 if there was nothing pending).
 ]]
-function FarmEconomyService.SellBag(player: Player): number
+function FarmEconomyService.CollectEarnings(player: Player): number
 	local DataService = Framework:GetService("DataService")
 
-	local bag = DataService.Get(player, "Bag") or 0
-	if bag <= 0 then
+	local pending = DataService.Get(player, "PendingEarnings") or 0
+	if pending <= 0 then
 		return 0
 	end
 
-	local payout = Bamboo.Economy.SellValue(bag)
-	DataService.Set(player, "Bag", 0)
-	local money = DataService.Increment(player, "Money", payout) or 0
+	-- Read once, then a single atomic pair of writes, so the player is never
+	-- mid-collection with earnings cleared but Money not yet credited (or
+	-- collected twice by two ticks landing back-to-back).
+	DataService.Set(player, "PendingEarnings", 0)
+	local money = DataService.Increment(player, "Money", pending) or 0
 
-	Relay.Bamboo.Sold.sendTo({ amount = bag, money = money }, player)
-	return bag
+	Relay.Bamboo.Sold.sendTo({ amount = pending, money = money }, player)
+	return pending
 end
 
-local function _tickSelling()
+local function _tickCollecting()
 	local PlotService = Framework:GetService("PlotService")
 
 	for _, player in Players:GetPlayers() do
@@ -64,8 +71,8 @@ local function _tickSelling()
 		if not root then
 			continue
 		end
-		if _isInSellZone(root, plot.SellZone) then
-			FarmEconomyService.SellBag(player)
+		if _isAtCollector(root, plot.CashCollector) then
+			FarmEconomyService.CollectEarnings(player)
 		end
 	end
 end
@@ -118,15 +125,18 @@ function FarmEconomyService:Start(fw: any)
 	Framework = fw
 
 	Relay.Bamboo.BuyUpgrade.listen(_onBuyUpgrade)
+	Relay.Bamboo.CollectEarnings.listen(function(_payload: any, player: Player)
+		FarmEconomyService.CollectEarnings(player)
+	end)
 
 	local accumulator = 0
 	RunService.Heartbeat:Connect(function(dt: number)
 		accumulator += dt
-		if accumulator < SELL_TICK_SECONDS then
+		if accumulator < COLLECT_TICK_SECONDS then
 			return
 		end
 		accumulator = 0
-		_tickSelling()
+		_tickCollecting()
 	end)
 end
 

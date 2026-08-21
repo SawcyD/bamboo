@@ -14,6 +14,7 @@ local Core = require(ReplicatedStorage:WaitForChild("Core"))
 local Bamboo = Core:GetDomain("Bamboo")
 local BambooModel = Core:GetShared("BambooModel")
 local Relay = Core:GetShared("Network")
+local StalkPose = require(script.Parent.Parent:WaitForChild("Modules"):WaitForChild("StalkPose"))
 
 local BambooGrowthController = {}
 
@@ -26,7 +27,10 @@ local GROWTH_BIND = "BambooGrowth"
 local STREAM_DISTANCE = 360
 local STREAM_DISTANCE_SQ = STREAM_DISTANCE * STREAM_DISTANCE
 local REFRESH_SECONDS = 0.5
-local BUILD_PER_FRAME = 12
+-- Stalk models built per frame. Lowered from 12 with the forest pass: a stalk is
+-- now ~14 parts rather than ~10, so the old budget was building ~40% more parts
+-- per frame than it was tuned for.
+local BUILD_PER_FRAME = 8
 local CUT_CORPSE_SECONDS = 0.85
 
 type StalkEntry = {
@@ -185,6 +189,9 @@ end
 
 local function _destroyModel(stalk: StalkEntry)
 	if stalk.Model then
+		-- Release the pose entry before the Instance goes, so the shared pose loop
+		-- never holds a destroyed model waiting for its own sweep to notice.
+		StalkPose.Unregister(stalk.Model)
 		stalk.Model:Destroy()
 		stalk.Model = nil
 	end
@@ -292,7 +299,12 @@ local function _applyPlotSnapshot(raw: any)
 	field.Active = _isInStream(field)
 	if field.Active then
 		_ensureFolder(field)
-		_ensureSlots(field)
+		-- Only the owned plot derives its layout inline. The initial snapshot
+		-- carries every plot in stream range, and deriving all of them here is the
+		-- join-time freeze; the rest are picked up one per refresh tick.
+		if _isOwned(field) then
+			_ensureSlots(field)
+		end
 	end
 end
 
@@ -338,6 +350,11 @@ local function _buildModel(field: FieldEntry, stalk: StalkEntry, now: number)
 	stalk.Model = model
 	stalk.Stage = _currentStage(field, stalk, now)
 	model:SetAttribute("Stage", stalk.Stage)
+
+	-- Hand the stalk to the shared pose loop. `base` is the authoritative rest
+	-- frame: every sway, recoil, and topple is a rotation of it, which is what
+	-- keeps repeated hits from accumulating drift.
+	StalkPose.Register(model, stalk.Id, base, stalk.Rarity, stalk.Stage, scale)
 end
 
 local function _applyCut(field: FieldEntry, raw: any)
@@ -438,17 +455,40 @@ local function _applyDelta(payload: any)
 	end
 end
 
+-- Deriving a plot's slot layout is the single most expensive thing this
+-- controller does: Field.BuildSlots dart-throws for a fully-upgraded field and
+-- then runs a farthest-point traversal, which is O(n^2) in the stalk count. At
+-- Field.DensityMaxStalks possible stalks that is still tens of thousands of
+-- operations, synchronously.
+--
+-- Doing that for every plot inside the 360-stud stream radius in one frame is a
+-- visible freeze on join, and a freeze is not harmless here: it used to make the
+-- rotor bank a hitch's worth of swings and burst them past the server's rate
+-- limit. So only one *unowned* plot is derived per refresh tick, spreading the
+-- cost over a few seconds. The owned plot is always derived immediately — that
+-- is the field the player is standing in.
 local function _refreshFields()
+	local deferred: FieldEntry? = nil
+
 	for _, field in _fields do
 		_plotFor(field)
 		local shouldBeActive = _isInStream(field)
 		if shouldBeActive then
 			field.Active = true
 			_ensureFolder(field)
-			_ensureSlots(field)
+			if field.Slots or _isOwned(field) then
+				_ensureSlots(field)
+			elseif not deferred then
+				-- First plot still missing a layout; the rest wait their turn.
+				deferred = field
+			end
 		elseif field.Active then
 			_unloadField(field)
 		end
+	end
+
+	if deferred then
+		_ensureSlots(deferred)
 	end
 end
 
@@ -491,11 +531,20 @@ local function _updateGrowing(now: number)
 
 			local stage = _currentStage(field, stalk, now)
 			local scale = _currentScale(field, stalk, now)
-			if stage ~= stalk.Stage then
+			local stageChanged = stage ~= stalk.Stage
+			if stageChanged then
 				stalk.Stage = stage
 				model:SetAttribute("Stage", stage)
 			end
 			BambooModel.ApplyScale(model, scale, field.Slots[stalk.Id])
+			-- ApplyScale relaid every part from the slot frame, so the pose loop's
+			-- cached rest pivot has to be refreshed before it rotates the stalk.
+			StalkPose.SyncGrowth(model, stage, scale, stalk.Rarity)
+			if stageChanged then
+				-- Reaching a new stage gets a scale punch. Mature is the one that
+				-- matters: it is the visual announcement that the stalk is cuttable.
+				StalkPose.Pop(model, stage)
+			end
 			if stage == Bamboo.Field.Stage.Mature and scale >= 0.999 then
 				-- The server may keep the timestamp until its next growth tick; the
 				-- client no longer needs to spend a frame on this settled stalk.

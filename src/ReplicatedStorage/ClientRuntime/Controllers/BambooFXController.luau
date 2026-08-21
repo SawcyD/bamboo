@@ -1,16 +1,20 @@
 --!strict
--- Everything the player *feels* when bamboo is cut: impact reactions, severing
--- the stalk into anchored visual chunks, leaf bursts, combined camera shake, an FOV
--- punch, reward numbers, and the curved flight of collected pieces.
+-- Everything the player *feels* when bamboo is cut: impact reactions, leaf
+-- bursts, combined camera shake, an FOV punch, and reward numbers.
 --
 -- All of it is driven by a single SwingResult packet per swing. Breaks resolve
--- as a staggered cascade (nearest first, then chain hops), each one severing the
--- real model rather than popping a generic orb, so a wide sweep reads as
+-- as a staggered run (nearest first, then chain hops) so a wide sweep reads as
 -- crack-crack-crack instead of one simultaneous thud.
+--
+-- The break itself is not handled here. A confirmed break hands the stalk to
+-- SegmentCascade, which takes it apart joint by joint and owns the whole payoff
+-- from that point: dust, the rare-mutation reveal, the finale sting, and the
+-- reward fragments. This controller keeps only the screen-level reactions —
+-- shake, flare, FOV, and the floating number — plus the fallback for a packet
+-- that arrives after the stalk model is already gone.
 
 local Debris = game:GetService("Debris")
 local Players = game:GetService("Players")
-local RunService = game:GetService("RunService")
 local TweenService = game:GetService("TweenService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
@@ -19,10 +23,15 @@ local Audio = require(ReplicatedStorage:WaitForChild("Audio"))
 local Bamboo = Core:GetDomain("Bamboo")
 local FlashPool = Core:Get("FlashPool")
 local Orbify = Core:Get("Orbify")
-local Spring = Core:GetPackage("Spring")
 local Relay = Core:GetShared("Network")
 local Shake = Core:GetPackage("Shake")
 local AntiCheat = require(script.Parent:WaitForChild("AntiCheatController"))
+
+local ClientModules = script.Parent.Parent:WaitForChild("Modules")
+local StalkPose = require(ClientModules:WaitForChild("StalkPose"))
+local FeelBurst = require(ClientModules:WaitForChild("FeelBurst"))
+local SegmentCascade = require(ClientModules:WaitForChild("SegmentCascade"))
+local FeelConfig = require(script.Parent.Parent:WaitForChild("Configs"):WaitForChild("FeelConfig"))
 
 local BambooFXController = {}
 local Framework
@@ -37,18 +46,6 @@ local COLLECT_LADDER_STEPS = 6
 local COLLECT_STREAK_WINDOW = 1.2
 local REWARD_LABEL_SECONDS = 0.9
 
--- ── severing ────────────────────────────────────────────────────────────────
--- A broken stalk is cut in half: the top portion detaches and flies off as
--- anchored visual chunks (reusing the real segments, so rarity colour and material
--- already match), while the stub lingers with a pale cut cap and fades before
--- the server corpse is destroyed.
-local SEVER_CUT_FRACTION = 0.55
-local SEVER_CHUNK_LIFETIME = 1.8
-local SEVER_FADE_SECONDS = 0.35
-local SEVER_MIN_SPEED = 9
-local SEVER_MAX_SPEED = 15
-local SEVER_UP_SPEED = 12
-local SEVER_CAP_COLOR = Color3.fromRGB(224, 232, 188)
 -- Gap between one break in a cascade and the next.
 local BREAK_STAGGER_SECONDS = 0.055
 -- FOV punch: a fast zoom-kick that reads as impact without stopping time.
@@ -70,33 +67,16 @@ local _fovPunch = 0
 local _fovBase: number? = nil
 local _effectsFolder: Folder
 
--- ── stalk recoil ─────────────────────────────────────────────────────────────
+-- ── stalk pose ───────────────────────────────────────────────────────────────
 --
--- A struck stalk kicks away from the impact and springs back. One shared frame
--- loop drives every active recoil, so hitting eight stalks costs one loop and
--- eight table entries rather than eight threads and eight tweens.
+-- Stalk recoil used to live here, with its own frame loop and its own rest pose
+-- sampled via `model:GetPivot()`. It moved to the shared StalkPose module when
+-- idle sway landed: sway and recoil both want to write a stalk's transform, and
+-- a recoil that samples its rest pose from a *swaying* stalk adopts the swayed
+-- pose as upright and drifts a little further on every hit. StalkPose owns the
+-- transform instead, and rotates the plot's slot frame, which cannot drift.
 
-local RECOIL_BIND = "BambooStalkRecoil"
--- Radians the stalk bends at full kick. Small: the read is "WHACK", not an
--- animation.
-local RECOIL_MAX_RADIANS = math.rad(11)
-local RECOIL_SMOOTH_TIME = 0.11
--- Below this the recoil is imperceptible and the entry is dropped.
-local RECOIL_REST_EPSILON = 0.0015
--- Flash length, deliberately barely-there.
-local HIT_FLASH_SECONDS = 0.1
-
-type Recoil = {
-	Model: Model,
-	Base: CFrame,
-	-- Bend axis in world space, perpendicular to the impact direction.
-	Axis: Vector3,
-	Spring: any,
-}
-
-local _recoils: { [Model]: Recoil } = {}
-local _recoilCount = 0
-local _recoilBound = false
+local HIT = FeelConfig.StalkHit
 
 -- ── camera shake ─────────────────────────────────────────────────────────────
 
@@ -308,109 +288,6 @@ end
 
 -- ── breaking ─────────────────────────────────────────────────────────────────
 
---[[
-	Severs a broken stalk in half. The top portion detaches and flies off as
-	anchored visual chunks that reuse the real segment parts (so rarity colour and
-	material already match), while the bottom stub fades in place behind a pale
-	cut cap. The original top parts are hidden, not reparented, so the server's
-	delayed corpse destroy never fights a client-side reparent.
-	@param model Model The real stalk model (the server leaves it alive briefly).
-	@param position Vector3 Where the stalk stood.
-	@param origin Vector3 Where the swing came from; chunks fly away from it.
-	@return number How many chunks were launched (0 if the model was missing).
-]]
-local function _severStalk(model: Model, position: Vector3, origin: Vector3): number
-	local height = (model:GetAttribute("Height") :: number) or 0
-	local diameter = (model:GetAttribute("Diameter") :: number) or 0.65
-	local cutY = height * SEVER_CUT_FRACTION
-
-	local away = Vector3.new(position.X - origin.X, 0, position.Z - origin.Z)
-	if away.Magnitude < 0.05 then
-		away = Vector3.xAxis
-	end
-	away = away.Unit
-
-	-- The stalk's up direction, taken from its primary (bottom) segment, which
-	-- is rotated so its local X points up the stalk. Carries the field's tilt.
-	local primary = model.PrimaryPart
-	local stalkUp = if primary then primary.CFrame.RightVector else Vector3.yAxis
-
-	local chunkCount = 0
-	for _, part in model:GetDescendants() do
-		if not part:IsA("BasePart") then
-			continue
-		end
-		local offset = part:GetAttribute("BaseOffset") :: CFrame?
-		if not offset then
-			continue
-		end
-
-		if offset.Position.Y > cutY then
-			-- Top half: clone first (so the copy keeps its colour), then hide the
-			-- original in place and tween the copy. Anchored chunks avoid turning
-			-- every break into a local physics assembly or a pile of collidable
-			-- sideways parts on the ground.
-			local chunk = part:Clone()
-			part.Transparency = 1
-			chunk.Anchored = true
-			chunk.CanCollide = false
-			chunk.CanQuery = false
-			chunk.CanTouch = false
-			chunk.CastShadow = false
-			chunk.Parent = _effectsFolder
-
-			local travel = SEVER_MIN_SPEED + math.random() * (SEVER_MAX_SPEED - SEVER_MIN_SPEED)
-			local targetPosition = chunk.Position + away * travel * 0.22 + Vector3.new(0, SEVER_UP_SPEED * 0.12 - 3, 0)
-			local targetCFrame = CFrame.new(targetPosition)
-				* chunk.CFrame.Rotation
-				* CFrame.Angles(math.random() * 5 - 2.5, math.random() * 5 - 2.5, math.random() * 5 - 2.5)
-			TweenService:Create(
-				chunk,
-				TweenInfo.new(SEVER_CHUNK_LIFETIME, Enum.EasingStyle.Quad, Enum.EasingDirection.In),
-				{ CFrame = targetCFrame, Transparency = 1 }
-			):Play()
-			Debris:AddItem(chunk, SEVER_CHUNK_LIFETIME)
-			chunkCount += 1
-		else
-			-- Stub: fade it so the server corpse removal lands invisibly.
-			TweenService
-				:Create(part, TweenInfo.new(SEVER_FADE_SECONDS, Enum.EasingStyle.Quad, Enum.EasingDirection.In), {
-					Transparency = 1,
-				})
-				:Play()
-		end
-	end
-
-	-- Pale cut cap at the cut line, tilted with the stalk. Maps world X onto the
-	-- stalk's up axis so the cylinder disc sits flat across the cut face.
-	local capPos = model:GetPivot().Position + stalkUp * cutY
-	local capAxis = Vector3.new(1, 0, 0):Cross(stalkUp)
-	local capAngle = math.acos(math.clamp(stalkUp.X, -1, 1))
-	local capRotation = if capAxis.Magnitude < 1e-3
-		then CFrame.identity
-		else CFrame.fromAxisAngle(capAxis.Unit, capAngle)
-
-	local cap = Instance.new("Part")
-	cap.Name = "CutCap"
-	cap.Shape = Enum.PartType.Cylinder
-	cap.Size = Vector3.new(0.25, diameter * 1.05, diameter * 1.05)
-	cap.Color = SEVER_CAP_COLOR
-	cap.Material = Enum.Material.SmoothPlastic
-	cap.Anchored = true
-	cap.CanCollide = false
-	cap.CanQuery = false
-	cap.CanTouch = false
-	cap.CastShadow = false
-	cap.CFrame = CFrame.new(capPos) * capRotation
-	cap.Parent = _effectsFolder
-	Debris:AddItem(cap, SEVER_FADE_SECONDS + 0.15)
-	TweenService:Create(cap, TweenInfo.new(SEVER_FADE_SECONDS, Enum.EasingStyle.Quad, Enum.EasingDirection.In), {
-		Transparency = 1,
-	}):Play()
-
-	return chunkCount
-end
-
 -- Streams the value of a broken stalk into the player as a run of orbs. Shared
 -- by the sever path (real chunks fly off, a couple of orbs still fly home) and
 -- the no-model fallback.
@@ -527,78 +404,6 @@ end
 
 -- ── swing result ─────────────────────────────────────────────────────────────
 
--- One frame loop for every active recoil. Only bound while something is
--- actually recoiling, so an idle field costs nothing.
-local function _updateRecoils(dt: number)
-	for model, recoil in _recoils do
-		if not model.Parent then
-			_recoils[model] = nil
-			_recoilCount -= 1
-			continue
-		end
-
-		local bend = recoil.Spring:Update(dt)
-		if math.abs(bend) < RECOIL_REST_EPSILON and math.abs(recoil.Spring.Velocity) < RECOIL_REST_EPSILON then
-			-- Snap exactly back to base, so repeated recoils never accumulate drift.
-			model:PivotTo(recoil.Base)
-			_recoils[model] = nil
-			_recoilCount -= 1
-			continue
-		end
-
-		model:PivotTo(recoil.Base * CFrame.fromAxisAngle(recoil.Axis, bend))
-	end
-
-	if _recoilCount <= 0 and _recoilBound then
-		RunService:UnbindFromRenderStep(RECOIL_BIND)
-		_recoilBound = false
-	end
-end
-
---[[
-	Kicks a stalk away from an impact.
-	Re-hitting a stalk mid-recoil adds to the existing spring rather than
-	restarting it, so a fast rotor reads as sustained rattling.
-	@param model Model The stalk that was struck.
-	@param from Vector3 Where the hit came from; the stalk bends away from it.
-	@param force number Impact strength, scaled by damage and rarity weight.
-]]
-local function _recoilStalk(model: Model, from: Vector3, force: number)
-	local base = model:GetPivot()
-
-	local away = model:GetPivot().Position - from
-	away = Vector3.new(away.X, 0, away.Z)
-	if away.Magnitude < 0.05 then
-		away = Vector3.xAxis
-	end
-	away = away.Unit
-	-- Bending *away* from the impact means rotating about the axis perpendicular
-	-- to it, on the ground plane.
-	local axis = Vector3.new(-away.Z, 0, away.X)
-
-	local recoil = _recoils[model]
-	if not recoil then
-		recoil = {
-			Model = model,
-			-- Captured before the first kick, so it is always the upright pose.
-			Base = base,
-			Axis = axis,
-			Spring = Spring.new(0, RECOIL_SMOOTH_TIME),
-		}
-		_recoils[model] = recoil
-		_recoilCount += 1
-	else
-		recoil.Axis = axis
-	end
-
-	recoil.Spring:Impulse(RECOIL_MAX_RADIANS * math.clamp(force, 0.5, 2.2))
-
-	if not _recoilBound then
-		_recoilBound = true
-		RunService:BindToRenderStep(RECOIL_BIND, Enum.RenderPriority.Character.Value + 1, _updateRecoils)
-	end
-end
-
 -- Stalks in the local player's field, looked up once per swing rather than once
 -- per hit.
 local function _ownedStalkFolder(): Folder?
@@ -646,8 +451,8 @@ local function _reactStalk(folder: Folder?, stalkId: number, origin: Vector3, ra
 	-- Flash reads as impact first and rarity second: the stalk's colour is
 	-- blended most of the way to white so a Thick hit still looks like a hit.
 	-- The more beaten it is, the hotter the flash, so "almost down" shows.
-	FlashPool.Flash(model, rarity.color:Lerp(Color3.new(1, 1, 1), 0.72 + damageFrac * 0.2), HIT_FLASH_SECONDS)
-	_recoilStalk(model, origin, rarity.impactWeight * (1 + damageFrac * 0.6))
+	FlashPool.Flash(model, rarity.color:Lerp(Color3.new(1, 1, 1), 0.72 + damageFrac * 0.2), HIT.FlashSeconds)
+	StalkPose.Impulse(model, origin, rarity.impactWeight * (1 + damageFrac * 0.6), HIT.MaxRadians)
 end
 
 local function _onSwingResult(payload: any)
@@ -679,6 +484,16 @@ local function _onSwingResult(payload: any)
 	-- Resolved once per swing rather than once per hit.
 	local folder = _ownedStalkFolder()
 
+	-- Shared particle allowance for this entire swing packet. A 20-target
+	-- multi-hit has to cost about what a 4-target one does, so the budget is
+	-- spent down across every stalk rather than reset per stalk.
+	local particleBudget = FeelConfig.Burst.MaxParticlesPerSwing
+	local function spend(amount: number): number
+		local granted = math.max(math.min(amount, particleBudget), 0)
+		particleBudget -= granted
+		return granted
+	end
+
 	local breakSlot = 0
 	for _, hit in hits do
 		local rarity = Bamboo.Rarity.Get(hit.rarity)
@@ -702,16 +517,39 @@ local function _onSwingResult(payload: any)
 
 			-- Cascade: each break lands a beat after the last, so a multi-break
 			-- sweep reads as a run of cracks rather than one simultaneous pop.
+			-- Stalks felled by the same swing start their cascades a beat apart, so
+			-- a wide sweep reads as a run of stalks coming down rather than one
+			-- wall of noise.
+			local stalkStagger = (breakSlot - 1) * FeelConfig.Cascade.StalkStagger
+
 			task.delay((breakSlot - 1) * BREAK_STAGGER_SECONDS, function()
 				_burstLeaves(position, breakColor, rarity.impactWeight * mutation.revealWeight * 1.4)
+
 				local model = _findStalkModel(folder, hit.id)
-				if model and _severStalk(model, position, origin) > 0 then
-					-- The severed chunks carry the break; a short run of orbs
-					-- still flies home to carry the reward.
-					if collected > 0 then
-						_collectIntoBag(position, breakColor, rarity.thicknessScale)
-					end
-				else
+				local ran = false
+				if model then
+					-- The stalk breaks upward through its joints. The cascade owns
+					-- the whole payoff from here: dust, the rare reveal, the finale
+					-- sting, and the reward fragments.
+					ran = SegmentCascade.Run({
+						Model = model,
+						Position = position,
+						Origin = origin,
+						Rarity = rarity,
+						Mutation = mutation,
+						-- nil when the bag was full: the stalk still breaks, it
+						-- just has nothing to send home.
+						Target = if collected > 0 then root else nil,
+						StartDelay = stalkStagger,
+					})
+				end
+
+				if not ran and not model then
+					-- No model to break — the packet arrived after the corpse was
+					-- already destroyed. Fall back to loose debris so the break is
+					-- never silent.
+					FeelBurst.Dust(position, rarity.impactWeight, spend(FeelConfig.Burst.Dust.Count))
+					FeelBurst.Reveal(position, mutation, spend(FeelConfig.Reveal.BaseCount))
 					_spawnDebris(position, breakColor, rarity.thicknessScale, collected > 0)
 				end
 			end)
@@ -723,6 +561,14 @@ local function _onSwingResult(payload: any)
 			maxDamageFrac = math.max(maxDamageFrac, damageFrac)
 			-- Smaller puff than a break, so the two never get confused.
 			_burstLeaves(position, breakColor, rarity.impactWeight * 0.5)
+			-- Wood chips off the cut face. Scaled by how beaten the stalk already
+			-- is, so the last hit before a break throws the most.
+			FeelBurst.Chips(
+				position + Vector3.new(0, 3, 0),
+				breakColor,
+				rarity.impactWeight * (0.6 + damageFrac),
+				spend(FeelConfig.Burst.Chip.Count)
+			)
 			_reactStalk(folder, hit.id, origin, rarity, damageFrac)
 		end
 	end

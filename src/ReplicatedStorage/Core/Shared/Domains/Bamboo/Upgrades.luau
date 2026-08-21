@@ -38,15 +38,6 @@ local definitions: { [string]: Definition } = {
 		maxLevel = 20,
 		effectText = "+1 Bamboo every 2 levels",
 	},
-	Storage = {
-		id = "Storage",
-		name = "STORAGE",
-		dataKey = "StorageLevel",
-		baseCost = 200,
-		costGrowth = 1.40,
-		maxLevel = 20,
-		effectText = "+25 Bag Capacity",
-	},
 	GrowthSpeed = {
 		id = "GrowthSpeed",
 		name = "GROWTH SPEED",
@@ -55,6 +46,15 @@ local definitions: { [string]: Definition } = {
 		costGrowth = 1.50,
 		maxLevel = 20,
 		effectText = "+6% Regrow Speed",
+	},
+	ProcessingSpeed = {
+		id = "ProcessingSpeed",
+		name = "PROCESSING SPEED",
+		dataKey = "ProcessingSpeedLevel",
+		baseCost = 350,
+		costGrowth = 1.50,
+		maxLevel = 20,
+		effectText = "+8% Processing Speed",
 	},
 	Density = {
 		id = "Density",
@@ -75,8 +75,8 @@ Upgrades.Order = table.freeze({
 	"SwingSpeed",
 	"MultiHit",
 	"Yield",
-	"Storage",
 	"GrowthSpeed",
+	"ProcessingSpeed",
 	"Density",
 })
 

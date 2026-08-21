@@ -160,12 +160,9 @@ local function _tickPickup()
 			continue
 		end
 
-		local bag = DataService.Get(player, "Bag") or 0
-		local capacity = Bamboo.Value.BagCapacity(DataService.Get(player, "StorageLevel") or 0)
-		local room = capacity - bag
-		if room <= 0 then
-			continue
-		end
+		-- The stockpile has no capacity limit, so there is never a reason to skip
+		-- a pickup here — unlike the old bag, room is never the blocker.
+		local room = math.huge
 
 		local radiusSq = _pickupRadiusFor(player) ^ 2
 		local collected: { any } = {}
@@ -195,7 +192,7 @@ local function _tickPickup()
 		end
 
 		if total > 0 then
-			DataService.Increment(player, "Bag", total)
+			DataService.Increment(player, "BambooStock", total)
 			DataService.Increment(player, "LifetimeBambooCollected", total)
 			Relay.Bamboo.DropsCollected.sendTo({ drops = collected, total = total }, player)
 		end

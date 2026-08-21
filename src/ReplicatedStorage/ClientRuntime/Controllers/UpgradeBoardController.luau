@@ -20,6 +20,11 @@ local Replica = Core:Get("Replica")
 local UI = require(ReplicatedStorage:WaitForChild("UI"))
 local Ripple = UI:GetModule("Ripple")
 
+local ClientModules = script.Parent.Parent:WaitForChild("Modules")
+local FeelBurst = require(ClientModules:WaitForChild("FeelBurst"))
+local FeelConfig = require(script.Parent.Parent:WaitForChild("Configs"):WaitForChild("FeelConfig"))
+local Spring = Core:GetPackage("Spring")
+
 local UpgradeBoardController = {}
 
 local LOCAL_PLAYER = Players.LocalPlayer
@@ -28,6 +33,13 @@ local BUY_ACTION = "BambooBuyUpgrade"
 local PROXIMITY_STUDS = 14
 local REFRESH_BIND = "BambooBoardRefresh"
 
+local BOARD = FeelConfig.Board
+local FEEL_BIND = "BambooBoardFeel"
+-- Boards further than this from the camera are settled and skipped. A plot is
+-- 160 studs and plots sit 220 apart, so this keeps the player's own six boards
+-- and a neighbouring plot's live while dropping the other ten plots.
+local BOARD_VISIBLE_SQ = 180 * 180
+
 type BoardView = {
 	Part: BasePart,
 	UpgradeId: string,
@@ -35,6 +47,21 @@ type BoardView = {
 	StatLabel: TextLabel,
 	CostButton: TextButton,
 	PromptLabel: TextLabel,
+
+	-- Rest pose, captured once at attach. Every lean and punch is expressed as an
+	-- offset from this, so repeated purchases cannot walk the board off its base.
+	BaseCFrame: CFrame,
+	BaseSize: Vector3,
+	-- Lean toward the player when selected; 0 at rest, 1 fully leaned.
+	Lean: any,
+	-- Purchase punch, decaying to 0.
+	Punch: any,
+	-- Set while the board is affordable, which drives the idle glow.
+	Affordable: boolean,
+	Light: PointLight?,
+	-- True once a distance-culled board has been returned to its rest pose, so
+	-- the loop stops writing to it every frame.
+	Settled: boolean,
 }
 
 local _boards: { BoardView } = {}
@@ -80,27 +107,76 @@ local function _attachBoard(part: BasePart): BoardView?
 		return nil
 	end
 
-	local billboard = Instance.new("BillboardGui")
-	billboard.Name = "BoardUI"
-	billboard.Size = UDim2.fromScale(9, 6)
-	billboard.StudsOffsetWorldSpace = Vector3.new(0, 6, 0)
-	billboard.MaxDistance = 60
-	billboard.Parent = part
+	-- Mounted flush on the board's front face rather than floating above it, so
+	-- the board reads as a real sign the player walks up to, not a HUD element
+	-- that happens to hover near one.
+	local surface = Instance.new("SurfaceGui")
+	surface.Name = "BoardUI"
+	-- PlotService builds each board already rotated to face the walk-up, so
+	-- Front is the face pointing at the player. If a future authored board
+	-- model uses a different local orientation, flip this to Back.
+	surface.Face = Enum.NormalId.Front
+	surface.SizingMode = Enum.SurfaceGuiSizingMode.FixedSize
+	surface.CanvasSize = Vector2.new(360, 240)
+	surface.LightInfluence = 0
+	surface.AlwaysOnTop = true
+	surface.MaxDistance = 60
+	surface.Parent = part
+
+	local padding = Instance.new("UIPadding")
+	padding.PaddingTop = UDim.new(0, 14)
+	padding.PaddingBottom = UDim.new(0, 14)
+	padding.PaddingLeft = UDim.new(0, 12)
+	padding.PaddingRight = UDim.new(0, 12)
+	padding.Parent = surface
 
 	local list = Instance.new("UIListLayout")
 	list.SortOrder = Enum.SortOrder.LayoutOrder
 	list.HorizontalAlignment = Enum.HorizontalAlignment.Center
-	list.Parent = billboard
+	list.Padding = UDim.new(0, 6)
+	list.Parent = surface
+
+	-- One light per board, off at rest. Boards are static and few (six per plot),
+	-- so a light each is affordable where a per-stalk light would not be.
+	local light = Instance.new("PointLight")
+	light.Name = "BoardGlow"
+	light.Color = Color3.fromRGB(255, 226, 130)
+	light.Brightness = 0
+	light.Range = BOARD.PurchaseLightRange
+	light.Shadows = false
+	light.Parent = part
 
 	local view: BoardView = {
 		Part = part,
 		UpgradeId = def.id,
-		TitleLabel = _newText(billboard, 1, 34, Color3.fromRGB(255, 255, 255)),
-		StatLabel = _newText(billboard, 2, 26, Color3.fromRGB(196, 232, 190)),
-		CostButton = _newButton(billboard, 3, 30, Color3.fromRGB(255, 226, 130)),
-		PromptLabel = _newText(billboard, 4, 22, Color3.fromRGB(200, 200, 210)),
+		TitleLabel = _newText(surface, 1, 40, Color3.fromRGB(255, 255, 255)),
+		StatLabel = _newText(surface, 2, 30, Color3.fromRGB(196, 232, 190)),
+		CostButton = _newButton(surface, 3, 54, Color3.fromRGB(255, 226, 130)),
+		PromptLabel = _newText(surface, 4, 24, Color3.fromRGB(200, 200, 210)),
+		BaseCFrame = part.CFrame,
+		BaseSize = part.Size,
+		Lean = Spring.new(0, BOARD.SelectSmoothTime),
+		Punch = Spring.new(0, BOARD.SelectSmoothTime),
+		Affordable = false,
+		Light = light,
+		Settled = false,
 	}
 	view.TitleLabel.Text = def.name
+
+	-- A real button, not just clickable text: filled background and rounded
+	-- corners so it reads as "press me" even before the player is close enough
+	-- to read the cost on it.
+	view.CostButton.AutoButtonColor = false
+	view.CostButton.BackgroundTransparency = 0
+	view.CostButton.BackgroundColor3 = Color3.fromRGB(58, 46, 30)
+	local buttonCorner = Instance.new("UICorner")
+	buttonCorner.CornerRadius = UDim.new(0, 8)
+	buttonCorner.Parent = view.CostButton
+	local buttonStroke = Instance.new("UIStroke")
+	buttonStroke.Color = Color3.fromRGB(255, 226, 130)
+	buttonStroke.Transparency = 0.3
+	buttonStroke.Thickness = 2
+	buttonStroke.Parent = view.CostButton
 
 	Ripple.Bind(view.CostButton, { Color = Color3.fromRGB(255, 240, 190) })
 	view.CostButton.Activated:Connect(function()
@@ -115,8 +191,8 @@ local STAT_FORMAT: { [string]: string } = {
 	SwingSpeed = "%.2fs swing",
 	MultiHit = "%d targets",
 	Yield = "%d per stalk",
-	Storage = "%d bag",
 	GrowthSpeed = "%.0fs regrow",
+	ProcessingSpeed = "%.2f bamboo/s",
 	Density = "%d in field",
 }
 
@@ -146,18 +222,21 @@ local function _refreshBoards()
 			view.CostButton.Text = "MAXED"
 			view.CostButton.TextColor3 = Color3.fromRGB(180, 200, 255)
 			view.PromptLabel.Text = ""
+			-- A maxed board has nothing to offer, so it stops glowing.
+			view.Affordable = false
 			continue
 		end
 
 		local cost = Bamboo.Value.UpgradeCost(view.UpgradeId, level)
-		view.CostButton.Text = "$" .. FormatUtil.Number(cost)
+		view.CostButton.Text = "UPGRADE — $" .. FormatUtil.Number(cost)
+		-- Drives the idle glow: only boards the player can actually afford invite
+		-- attention, so six boards never all shout at once.
+		view.Affordable = money >= cost
 		view.CostButton.TextColor3 = if money >= cost
 			then Color3.fromRGB(150, 255, 160)
 			else Color3.fromRGB(255, 140, 140)
 		view.CostButton.Active = view == _nearest
-		view.PromptLabel.Text = if view == _nearest
-			then "[E] / Tap to Upgrade  •  " .. def.effectText
-			else def.effectText
+		view.PromptLabel.Text = if view == _nearest then def.effectText .. "  •  [E]" else def.effectText
 	end
 end
 
@@ -182,6 +261,112 @@ local function _updateNearest()
 
 	if _nearest ~= previous then
 		_refreshBoards()
+	end
+end
+
+-- ── board feel ───────────────────────────────────────────────────────────────
+
+-- One shared loop for every board on every plot. Binding per board would mean up
+-- to 72 frame connections in a full twelve-plot server just for an idle glow.
+--
+-- Even with one loop, 72 boards x (spring + CFrame + Size + light) every frame is
+-- real work on a phone for something the player cannot see, so boards are culled
+-- by distance and skipped entirely once they have settled back to rest.
+local function _updateBoardFeel(dt: number)
+	if not FeelConfig.Enabled.BoardFeel then
+		return
+	end
+
+	local camera = workspace.CurrentCamera
+	local observer = if camera then camera.CFrame.Position else nil
+	local pulse = (math.sin(os.clock() * math.pi * 2 / BOARD.IdlePulseSeconds) + 1) * 0.5
+
+	for _, view in _boards do
+		local part = view.Part
+		if not part.Parent then
+			continue
+		end
+
+		local selected = view == _nearest
+
+		if observer and not selected then
+			local offset = part.Position - observer
+			local distanceSq = offset.X * offset.X + offset.Y * offset.Y + offset.Z * offset.Z
+			if distanceSq > BOARD_VISIBLE_SQ then
+				-- Out of sight. Settle it once and stop paying for it: another
+				-- player's plot across the map must not cost this client frames.
+				if view.Settled ~= true then
+					view.Settled = true
+					view.Lean:Reset(0)
+					view.Punch:Reset(0)
+					part.CFrame = view.BaseCFrame
+					part.Size = view.BaseSize
+					if view.Light then
+						view.Light.Brightness = 0
+					end
+				end
+				continue
+			end
+		end
+		view.Settled = false
+		view.Lean.Target = if selected then 1 else 0
+		local lean = view.Lean:Update(dt)
+		local punch = view.Punch:Update(dt)
+
+		-- Lean is toward the player, which for a board angled into the plot means
+		-- tipping back about its own local X and lifting slightly.
+		local offset = CFrame.new(0, BOARD.SelectRaiseStuds * lean, 0)
+			* CFrame.Angles(-BOARD.SelectLeanRadians * lean, 0, 0)
+			-- The purchase punch shares the lean axis so the two compose instead
+			-- of fighting for the board's orientation.
+			* CFrame.Angles(BOARD.PurchaseShakeRadians * punch, 0, 0)
+		part.CFrame = view.BaseCFrame * offset
+		part.Size = view.BaseSize * (1 + (BOARD.PurchasePunchScale - 1) * math.max(punch, 0))
+
+		local light = view.Light
+		if light then
+			-- Idle glow only for affordable boards, stronger for the one the
+			-- player is standing at, plus whatever the purchase punch adds.
+			local idle = if view.Affordable
+				then (if selected then BOARD.NearestGlow else BOARD.AffordableGlow) * (0.6 + pulse * 0.4)
+				else 0
+			light.Brightness = idle + BOARD.PurchaseLightBrightness * math.max(punch, 0)
+		end
+	end
+end
+
+-- Physical answer to a purchase. Success punches the board and throws a burst;
+-- a rejection shudders it the other way, so "I can't afford this" is something
+-- the world says rather than only a red number.
+local function _onUpgradeResult(payload: any)
+	_refreshBoards()
+	if not FeelConfig.Enabled.BoardFeel then
+		return
+	end
+
+	local upgradeId = payload.upgradeId :: string
+	for _, view in _boards do
+		if view.UpgradeId ~= upgradeId then
+			continue
+		end
+
+		if payload.ok then
+			view.Punch:Impulse(1)
+			FeelBurst.Emit(view.Part.Position + Vector3.new(0, view.BaseSize.Y * 0.5, 0), {
+				Color = Color3.fromRGB(255, 226, 130),
+				Count = 16,
+				Size = 0.4,
+				Speed = NumberRange.new(8, 16),
+				Lifetime = NumberRange.new(0.25, 0.5),
+				Gravity = -12,
+				LightEmission = 1,
+			})
+		else
+			-- Negative impulse: the board rocks the opposite way, which reads as a
+			-- refusal rather than a weaker success.
+			view.Punch:Impulse(-BOARD.RejectShakeRadians / BOARD.PurchaseShakeRadians)
+		end
+		break
 	end
 end
 
@@ -228,6 +413,15 @@ function UpgradeBoardController:Start(_fw: any)
 	CollectionService:GetInstanceRemovedSignal(BOARD_TAG):Connect(function(instance: Instance)
 		for index, view in _boards do
 			if view.Part == instance then
+				-- An untagged board is not necessarily a destroyed one, so the
+				-- light this controller added has to be taken back explicitly.
+				if view.Light then
+					view.Light:Destroy()
+					view.Light = nil
+				end
+				if view == _nearest then
+					_nearest = nil
+				end
 				table.remove(_boards, index)
 				break
 			end
@@ -242,7 +436,7 @@ function UpgradeBoardController:Start(_fw: any)
 		replica:ListenToChange({ "Money" }, _refreshBoards)
 	end)
 
-	Relay.Bamboo.UpgradeResult.listen(_refreshBoards)
+	Relay.Bamboo.UpgradeResult.listen(_onUpgradeResult)
 
 	ContextActionService:BindAction(BUY_ACTION, _onBuyAction, true, Enum.KeyCode.E, Enum.KeyCode.ButtonX)
 	ContextActionService:SetTitle(BUY_ACTION, "Upgrade")
@@ -250,12 +444,15 @@ function UpgradeBoardController:Start(_fw: any)
 	local accumulator = 0
 	RunService:BindToRenderStep(REFRESH_BIND, Enum.RenderPriority.Last.Value, function(dt: number)
 		accumulator += dt
-		if accumulator < 0.2 then
-			return
+		if accumulator >= 0.2 then
+			accumulator = 0
+			-- Proximity only needs checking a few times a second; the springs
+			-- below still run every frame so the lean stays smooth.
+			_updateNearest()
 		end
-		accumulator = 0
-		_updateNearest()
 	end)
+
+	RunService:BindToRenderStep(FEEL_BIND, Enum.RenderPriority.Last.Value - 1, _updateBoardFeel)
 end
 
 return UpgradeBoardController

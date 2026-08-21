@@ -1,13 +1,17 @@
 --!strict
--- Persistent HUD: money, bag, combo, and the "BAG FULL" arrow pointing at the
--- sell zone.
+-- Persistent HUD: money, stockpile, carried bamboo, combo, and one directional
+-- arrow that guides the player through whichever step is next — pick up
+-- bamboo, carry it to the processor, or collect earnings. Reused rather than
+-- adding a second indicator: only its text and target change.
 --
--- Money and bag are the authored HUDStatsLabel components in
+-- Money and the bamboo readout are the authored HUDStatsLabel components in
 -- StarterGui.Main.HUD.LeftDownSide (Cash and Backpack). They live in the place
 -- file, not this repo, so they are bound by name at runtime and every write
 -- goes through ShadowText — both layers, or the shadow keeps the old number.
+-- The "Backpack" label is repurposed to show carried bamboo rather than
+-- renamed, so the authored kit needs no changes.
 --
--- Combo and the BAG FULL arrow have no authored counterpart, so they are still
+-- Combo and the guidance arrow have no authored counterpart, so they are still
 -- built here, into their own ScreenGui that sits under the kit's.
 
 local Players = game:GetService("Players")
@@ -28,7 +32,6 @@ local BambooHUDController = {}
 
 local LOCAL_PLAYER = Players.LocalPlayer
 local ARROW_BIND = "BambooSellArrow"
-local DROPPED_HINT_SECONDS = 1.6
 
 -- Combo counter. The number is the whole design: a big count, a small label,
 -- and a thin bar showing how much of the grace period is left.
@@ -38,7 +41,7 @@ local MILESTONE_SIZE = 22
 
 -- Authored HUD components, when the kit is present.
 local _cashText: TextLabel? = nil
-local _bagText: TextLabel? = nil
+local _bambooText: TextLabel? = nil
 
 -- Built here, always.
 local _screen: ScreenGui
@@ -53,10 +56,20 @@ local _arrow: TextLabel
 local _combo = 0
 local _comboWindow = 0
 local _comboEndsAt = 0
-local _lastBag = 0
+local _lastStock = 0
 local _lastMoney = 0
--- While set, the arrow shows the drop hint instead of the direction readout.
-local _droppedHintUntil = 0
+
+-- Which world target the arrow is currently steering toward, and what it says.
+-- Recomputed every refresh from BambooStock/CarriedBamboo/PendingEarnings so
+-- the single arrow component can guide through the whole loop (pick up ->
+-- carry -> deposit -> collect) without a second indicator being added.
+type ArrowState = "Hidden" | "PickUp" | "CarryToProcessor" | "EarningsReady"
+local _arrowState: ArrowState = "Hidden"
+-- Label text for the current state, without the arrow/distance suffix, which
+-- _updateArrow appends fresh every frame as the player turns.
+local _arrowBaseText = ""
+-- Which part in the owned plot the arrow currently steers toward.
+local _arrowTargetName = "Stockpile"
 
 -- ── authored HUD lookup ──────────────────────────────────────────────────────
 
@@ -87,7 +100,7 @@ local function _bindAuthoredHud()
 	end
 
 	_cashText = _statLabel(stats:FindFirstChild("Cash"))
-	_bagText = _statLabel(stats:FindFirstChild("Backpack"))
+	_bambooText = _statLabel(stats:FindFirstChild("Backpack"))
 end
 
 -- ── own HUD construction ─────────────────────────────────────────────────────
@@ -165,9 +178,9 @@ local function _build()
 		_newLabel("Milestone", _comboRoot, UDim2.fromOffset(0, 86), UDim2.fromOffset(280, 22), MILESTONE_SIZE)
 	_milestoneLabel.TextTransparency = 1
 
-	_arrow = _newLabel("SellArrow", _screen, UDim2.new(0.5, -160, 0.5, -40), UDim2.fromOffset(320, 60), 28)
-	_arrow.TextColor3 = Color3.fromRGB(255, 120, 120)
-	_arrow.Text = "BAG FULL!"
+	_arrow = _newLabel("GuideArrow", _screen, UDim2.new(0.5, -160, 0.5, -40), UDim2.fromOffset(320, 60), 28)
+	_arrow.TextColor3 = Color3.fromRGB(255, 210, 120)
+	_arrow.Text = ""
 	_arrow.Visible = false
 end
 
@@ -206,21 +219,39 @@ local function _refreshFromData(data: any)
 	end
 	_lastMoney = money
 
-	local bag = data.Bag or 0
-	local capacity = Bamboo.Value.BagCapacity(data.StorageLevel or 0)
-	local full = bag >= capacity
-
-	if _bagText then
-		ShadowText.Set(_bagText, string.format("%d/%d", bag, capacity))
-		if full then
-			ShadowText.SetColor(_bagText, Color3.fromRGB(255, 120, 120))
-		elseif bag > _lastBag then
-			_flash(_bagText, Color3.fromRGB(150, 255, 160))
+	local stock = data.BambooStock or 0
+	if _bambooText then
+		ShadowText.Set(_bambooText, FormatUtil.Number(stock))
+		if stock > _lastStock then
+			_flash(_bambooText, Color3.fromRGB(150, 255, 160))
 		end
 	end
-	_lastBag = bag
+	_lastStock = stock
 
-	_arrow.Visible = full
+	local carried = data.CarriedBamboo or 0
+	local pending = data.PendingEarnings or 0
+
+	-- Priority: bamboo in hand is the most immediate thing to act on (walk it
+	-- to the processor), an empty-handed player standing on a stocked field
+	-- should go pick some up, and pending earnings are a gentler nudge that
+	-- only matters once there's nothing more pressing to do.
+	if carried > 0 then
+		_arrowState = "CarryToProcessor"
+		_arrowTargetName = "Processor"
+		_arrowBaseText = string.format("CARRYING %d — TO PROCESSOR", carried)
+	elseif stock > 0 then
+		_arrowState = "PickUp"
+		_arrowTargetName = "Stockpile"
+		_arrowBaseText = "PICK UP BAMBOO"
+	elseif pending > 0 then
+		_arrowState = "EarningsReady"
+		_arrowTargetName = "CashCollector"
+		_arrowBaseText = string.format("$%s READY", FormatUtil.Number(pending))
+	else
+		_arrowState = "Hidden"
+	end
+
+	_arrow.Visible = _arrowState ~= "Hidden"
 end
 
 -- Milestone callout: a short shout above the counter that never blocks play.
@@ -285,18 +316,11 @@ local function _updateComboWindow()
 	_comboBar.Size = UDim2.fromScale(remaining / _comboWindow, 1)
 end
 
--- Bag was too full to take the cut, so the bamboo hit the ground instead. The
--- arrow already says BAG FULL; this says what it just cost.
-local function _flashDropped(amount: number)
-	_arrow.Text = string.format("BAG FULL  —  %d dropped", amount)
-	_arrow.Visible = true
-	_punch(_arrow, 28, 10)
-	_droppedHintUntil = os.clock() + DROPPED_HINT_SECONDS
-end
-
--- Points the "BAG FULL" text toward the player's own sell zone.
+-- Points the arrow's current text toward whichever plot part _arrowTargetName
+-- names (Stockpile to pick up, Processor to deposit, CashCollector once
+-- earnings are ready) — one arrow, steering through the whole loop.
 local function _updateArrow()
-	if not _arrow.Visible or os.clock() < _droppedHintUntil then
+	if not _arrow.Visible then
 		return
 	end
 
@@ -315,26 +339,26 @@ local function _updateArrow()
 		if plot:GetAttribute("OwnerUserId") ~= LOCAL_PLAYER.UserId then
 			continue
 		end
-		local sellZone = plot:FindFirstChild("SellZone") :: BasePart?
-		if not sellZone then
+		local target = plot:FindFirstChild(_arrowTargetName) :: BasePart?
+		if not target then
 			return
 		end
 
-		local toZone = sellZone.Position - root.Position
-		local flat = Vector3.new(toZone.X, 0, toZone.Z)
+		local toTarget = target.Position - root.Position
+		local flat = Vector3.new(toTarget.X, 0, toTarget.Z)
 		local look = camera.CFrame.LookVector
 		local flatLook = Vector3.new(look.X, 0, look.Z)
 		if flat.Magnitude < 1e-3 or flatLook.Magnitude < 1e-3 then
 			return
 		end
 
-		-- Signed angle between where the camera looks and where the zone is.
+		-- Signed angle between where the camera looks and where the target is.
 		local right = Vector3.new(-flatLook.Z, 0, flatLook.X).Unit
 		local angle = math.atan2(flat.Unit:Dot(right), flat.Unit:Dot(flatLook.Unit))
 		local arrows = { "↑", "↗", "→", "↘", "↓", "↙", "←", "↖" }
 		local index = math.floor(((angle + math.pi * 2) % (math.pi * 2)) / (math.pi / 4) + 0.5) % 8 + 1
 
-		_arrow.Text = string.format("BAG FULL!  %s  %dm", arrows[index], math.floor(flat.Magnitude))
+		_arrow.Text = string.format("%s  %s  %dm", _arrowBaseText, arrows[index], math.floor(flat.Magnitude))
 		return
 	end
 end
@@ -359,7 +383,7 @@ function BambooHUDController:Start(_fw: any)
 
 	Replica:WaitForData("Player"):andThen(function(replica: any)
 		_refreshFromData(replica.Data)
-		for _, key in { "Money", "Bag", "StorageLevel" } do
+		for _, key in { "Money", "BambooStock", "CarriedBamboo", "PendingEarnings" } do
 			replica:ListenToChange({ key }, function()
 				_refreshFromData(replica.Data)
 			end)
@@ -367,12 +391,6 @@ function BambooHUDController:Start(_fw: any)
 	end)
 
 	Relay.Bamboo.ComboState.listen(_onComboState)
-
-	Relay.Bamboo.SwingResult.listen(function(payload: any)
-		if payload.dropped > 0 then
-			_flashDropped(payload.dropped)
-		end
-	end)
 
 	RunService:BindToRenderStep(ARROW_BIND, Enum.RenderPriority.Last.Value, _onFrame)
 end

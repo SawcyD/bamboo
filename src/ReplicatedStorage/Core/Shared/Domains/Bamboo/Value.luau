@@ -5,9 +5,9 @@
 -- enforce the same result without a round trip. The server still owns the
 -- authoritative call — a preview is never a grant.
 
-local Economy = require(script.Parent:WaitForChild("Economy"))
 local Field = require(script.Parent:WaitForChild("Field"))
 local Mutations = require(script.Parent:WaitForChild("Mutations"))
+local Processing = require(script.Parent:WaitForChild("Processing"))
 local Rarity = require(script.Parent:WaitForChild("Rarity"))
 local Tool = require(script.Parent:WaitForChild("Tool"))
 local Upgrades = require(script.Parent:WaitForChild("Upgrades"))
@@ -56,15 +56,6 @@ end
 function Value.StalkReward(rarityId: string, yieldLevel: number, mutationId: string?): number
 	local base = Value.YieldPerStalk(yieldLevel) * Rarity.Get(rarityId).rewardMultiplier
 	return math.floor(base * Mutations.Get(mutationId).valueMultiplier)
-end
-
---[[
-	How much bamboo the bag holds.
-	@param level number The player's Storage level.
-	@return number Bag capacity.
-]]
-function Value.BagCapacity(level: number): number
-	return Economy.BagCapacity + level * 25
 end
 
 --[[
@@ -119,11 +110,19 @@ end
 
 --[[
 	How many stalks the field holds.
+
+	Interpolates evenly from Field.MaxStalks (level 0) to Field.DensityMaxStalks
+	(the Density upgrade's top level), so the per-level step is derived from those
+	two endpoints rather than a separate hardcoded number — retuning either
+	endpoint in Field.luau is enough to reshape the whole curve.
+
 	@param level number The player's Density level.
 	@return number Stalk count.
 ]]
 function Value.MaxStalks(level: number): number
-	return Field.MaxStalks + level * 8
+	local maxLevel = Upgrades.Get("Density").maxLevel
+	local perLevel = (Field.DensityMaxStalks - Field.MaxStalks) / maxLevel
+	return Field.MaxStalks + math.min(level, maxLevel) * perLevel
 end
 
 --[[
@@ -134,6 +133,27 @@ end
 function Value.MaxPossibleStalks(): number
 	local definition = Upgrades.Get("Density")
 	return Value.MaxStalks(if definition then definition.maxLevel else 0)
+end
+
+--[[
+	Seconds one processor batch takes, accounting for the owner's Processing
+	Speed level. Mirrors SwingTime's shape: same +8%/level curve, applied to the
+	processor's batch clock instead of the sickle's swing clock.
+	@param level number The player's Processing Speed level.
+	@return number Batch duration in seconds.
+]]
+function Value.ProcessorBatchSeconds(level: number): number
+	return Processing.BatchSeconds / (1 + level * 0.08)
+end
+
+--[[
+	Raw bamboo the processor consumes per second at a given Processing Speed
+	level, for board displays.
+	@param level number The player's Processing Speed level.
+	@return number Bamboo/sec.
+]]
+function Value.ProcessorRate(level: number): number
+	return Processing.InputPerBatch / Value.ProcessorBatchSeconds(level)
 end
 
 --[[
@@ -163,10 +183,10 @@ function Value.StatAtLevel(upgradeId: string, level: number): number
 		return Value.MultiHitTargets(level)
 	elseif upgradeId == "Yield" then
 		return Value.YieldPerStalk(level)
-	elseif upgradeId == "Storage" then
-		return Value.BagCapacity(level)
 	elseif upgradeId == "GrowthSpeed" then
 		return Value.RegrowSeconds(level)
+	elseif upgradeId == "ProcessingSpeed" then
+		return Value.ProcessorRate(level)
 	elseif upgradeId == "Density" then
 		return Value.MaxStalks(level)
 	end

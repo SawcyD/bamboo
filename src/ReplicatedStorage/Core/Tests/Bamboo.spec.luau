@@ -74,11 +74,6 @@ return function(t)
 		t.expect(Bamboo.Value.StalkReward("Thick", 0)).toBe(20)
 	end)
 
-	t.test("storage adds capacity on top of the base bag", function()
-		t.expect(Bamboo.Value.BagCapacity(0)).toBe(Bamboo.Economy.BagCapacity)
-		t.expect(Bamboo.Value.BagCapacity(4)).toBe(Bamboo.Economy.BagCapacity + 100)
-	end)
-
 	t.test("growth speed only ever shortens regrow time", function()
 		t.expect(Bamboo.Value.RegrowSeconds(0)).toBe(Bamboo.Field.RegrowSeconds)
 		for level = 1, 20 do
@@ -95,9 +90,18 @@ return function(t)
 		end
 	end)
 
-	t.test("density thickens the field eight stalks at a time", function()
+	t.test("density interpolates evenly from the base field to the maxed one", function()
+		local density = Bamboo.Upgrades.Get("Density")
 		t.expect(Bamboo.Value.MaxStalks(0)).toBe(Bamboo.Field.MaxStalks)
-		t.expect(Bamboo.Value.MaxStalks(3)).toBe(Bamboo.Field.MaxStalks + 24)
+		t.expect(Bamboo.Value.MaxStalks(density.maxLevel)).toBe(Bamboo.Field.DensityMaxStalks)
+
+		-- Strictly increasing and evenly spaced, so every level is a felt step
+		-- rather than a plateau followed by a jump.
+		local perLevel = (Bamboo.Field.DensityMaxStalks - Bamboo.Field.MaxStalks) / density.maxLevel
+		for level = 1, density.maxLevel do
+			local step = Bamboo.Value.MaxStalks(level) - Bamboo.Value.MaxStalks(level - 1)
+			t.expect(math.abs(step - perLevel) < 1e-6).toBeTruthy()
+		end
 	end)
 
 	t.test("plots can be pre-built for the largest reachable field", function()
@@ -483,8 +487,64 @@ return function(t)
 		end
 	end)
 
-	t.test("selling converts the bag at the configured rate", function()
-		t.expect(Bamboo.Economy.SellValue(Bamboo.Economy.BagCapacity))
-			.toBe(Bamboo.Economy.BagCapacity * Bamboo.Economy.MoneyPerBamboo)
+	t.test("selling converts raw bamboo at the configured rate", function()
+		t.expect(Bamboo.Economy.SellValue(50)).toBe(50 * Bamboo.Economy.MoneyPerBamboo)
+	end)
+
+	-- ── processing ───────────────────────────────────────────────────────────
+
+	t.test("a batch needs exactly InputPerBatch and never a fraction of it", function()
+		local Processing = Bamboo.Processing
+		t.expect(Processing.HasBatchInput(Processing.InputPerBatch)).toBeTruthy()
+		t.expect(Processing.HasBatchInput(Processing.InputPerBatch - 1)).toBeFalsy()
+	end)
+
+	t.test("input room never goes negative even over the cap", function()
+		local Processing = Bamboo.Processing
+		t.expect(Processing.InputRoom(Processing.MaxInputBuffer)).toBe(0)
+		t.expect(Processing.InputRoom(Processing.MaxInputBuffer + 50)).toBe(0)
+		t.expect(Processing.InputRoom(0)).toBe(Processing.MaxInputBuffer)
+	end)
+
+	t.test("selling converts Straw at the configured rate", function()
+		local Processing = Bamboo.Processing
+		t.expect(Processing.SellValue(Processing.OutputPerBatch))
+			.toBe(Processing.OutputPerBatch * Processing.StrawSellValue)
+		t.expect(Processing.SellValue(0)).toBe(0)
+	end)
+
+	t.test("processing pays more per raw-bamboo-equivalent than selling raw bamboo directly", function()
+		local Processing = Bamboo.Processing
+		local rawRate = Bamboo.Economy.MoneyPerBamboo
+		local strawRate = Processing.StrawSellValue / (Processing.InputPerBatch / Processing.OutputPerBatch)
+		t.expect(strawRate > rawRate).toBeTruthy()
+	end)
+
+	t.test("processing speed starts at exactly one bamboo per second", function()
+		t.expect(Bamboo.Value.ProcessorBatchSeconds(0)).toBe(Bamboo.Processing.BatchSeconds)
+		t.expect(Bamboo.Value.ProcessorRate(0)).toBeCloseTo(1, 1e-6)
+	end)
+
+	t.test("processing speed only ever speeds up with level", function()
+		for level = 1, 20 do
+			t.expect(Bamboo.Value.ProcessorBatchSeconds(level) < Bamboo.Value.ProcessorBatchSeconds(level - 1))
+				.toBeTruthy()
+			t.expect(Bamboo.Value.ProcessorRate(level) > Bamboo.Value.ProcessorRate(level - 1)).toBeTruthy()
+		end
+	end)
+
+	t.test("the processor consumes raw bamboo slower than level-0 harvesting produces it", function()
+		-- Mirrors the throughput used to justify BatchSeconds in Processing.luau's
+		-- own comment: starter sickle (damage 1, base multi-hit 3) against a
+		-- Normal stalk's 3 health, at level-0 Yield (2 bamboo/stalk).
+		local swingTime = Bamboo.Value.SwingTime(0)
+		local health = Bamboo.Rarity.Get("Normal").health
+		local yieldPerStalk = Bamboo.Value.YieldPerStalk(0)
+		local multiHit = Bamboo.Tool.BaseMultiHit
+
+		local bambooPerSecCutting = (multiHit * yieldPerStalk) / (health * swingTime)
+		local bambooPerSecProcessing = Bamboo.Processing.InputPerBatch / Bamboo.Processing.BatchSeconds
+
+		t.expect(bambooPerSecProcessing < bambooPerSecCutting).toBeTruthy()
 	end)
 end

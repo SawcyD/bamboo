@@ -13,8 +13,16 @@ local Field = {}
 -- Base field. Sized so the plot reads as a bamboo forest from the first second
 -- — full coverage, thickets to sweep, lanes to run — rather than as scattered
 -- stalks. Density then thickens it further rather than making it playable.
+--
+-- The default (0 Density levels) is meant to feel noticeably more breathable
+-- than the maxed-out field; DensityMaxStalks is the "current screenshot" density
+-- and is reached only at the Density upgrade's top level.
 Field.MaxStalks = 180
 Field.StartingStalks = 180
+-- Stalk count at the top Density level. Value.MaxStalks() interpolates evenly
+-- between MaxStalks and this across the upgrade's level range, so retuning
+-- either endpoint here is the only place progression needs to change.
+Field.DensityMaxStalks = 240
 Field.RegrowSeconds = 40
 -- A cut stalk reseeds as a Shoot right away, becomes Young after ShootSeconds,
 -- and is only cuttable again once RegrowSeconds have passed.

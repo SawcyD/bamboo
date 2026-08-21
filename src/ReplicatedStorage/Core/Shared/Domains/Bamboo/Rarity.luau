@@ -44,8 +44,10 @@ local definitions: { [string]: Definition } = {
 		chance = 3,
 		rewardMultiplier = 10,
 		health = 3,
-		heightScale = 1.15,
-		thicknessScale = 2.1,
+		-- Barely taller than Normal on purpose: Thick's read is *girth*. Letting it
+		-- gain height too made it compete with Tall instead of contrasting with it.
+		heightScale = 1.05,
+		thicknessScale = 2.4,
 		color = Color3.fromRGB(64, 104, 52),
 		impactWeight = 2.4,
 	},
@@ -61,8 +63,10 @@ Rarity.Variation = table.freeze({
 	HeightSpread = 0.15, -- ±15%
 	ThicknessSpread = 0.20, -- ±20%
 	MaxTiltDegrees = 7,
-	LeafCountMin = 2,
-	LeafCountMax = 5,
+	-- Raised with the forest height pass: a 16-stud stalk carrying only two leaves
+	-- reads as a pole. Still low enough that a full field stays part-cheap.
+	LeafCountMin = 3,
+	LeafCountMax = 6,
 	ColorJitter = 0.06, -- fraction of channel range
 })
 
